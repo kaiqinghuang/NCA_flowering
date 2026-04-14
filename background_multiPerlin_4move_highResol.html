@@ -1379,8 +1379,20 @@ function depositSprayPixel(bm, x, y, strength, strokeToken) {
   bm.mask[idx] = nextMask;
   bm.life[idx] = -drawHoldLifeOffset;
   bm.active = true;
-  strokeModelMap[idx] = bm.id;
-  strokeOrderMap[idx] = strokeToken;
+  var currentOwner = strokeModelMap[idx];
+  if (currentOwner === -1 || currentOwner === bm.id) {
+    strokeModelMap[idx] = bm.id;
+    strokeOrderMap[idx] = strokeToken;
+  } else {
+    var otherMask = 0;
+    for (var bi = 0; bi < brushModels.length; bi++) {
+      if (brushModels[bi].id === currentOwner) { otherMask = brushModels[bi].mask[idx]; break; }
+    }
+    if (nextMask > otherMask) {
+      strokeModelMap[idx] = bm.id;
+      strokeOrderMap[idx] = strokeToken;
+    }
+  }
   bm.accum[idx] += strength * sprayWetGain;
   if (bm.accum[idx] > sprayDripThreshold) {
     var overflow = bm.accum[idx] - sprayDripThreshold;
@@ -1523,8 +1535,20 @@ function evolveSingleBrushMask(bm) {
 
           bm.accum[ti] += core * 0.6;
           bm.life[ti] = Math.min(bm.life[ti], bm.life[si] - 0.01);
-          strokeModelMap[ti] = bm.id;
-          strokeOrderMap[ti] = Math.max(strokeOrderMap[ti], strokeOrderMap[si]);
+          var dripOwner = strokeModelMap[ti];
+          if (dripOwner === -1 || dripOwner === bm.id) {
+            strokeModelMap[ti] = bm.id;
+            strokeOrderMap[ti] = Math.max(strokeOrderMap[ti], strokeOrderMap[si]);
+          } else {
+            var dripOtherMask = 0;
+            for (var obi = 0; obi < brushModels.length; obi++) {
+              if (brushModels[obi].id === dripOwner) { dripOtherMask = brushModels[obi].mask[ti]; break; }
+            }
+            if (newMaskCenter > dripOtherMask) {
+              strokeModelMap[ti] = bm.id;
+              strokeOrderMap[ti] = Math.max(strokeOrderMap[ti], strokeOrderMap[si]);
+            }
+          }
           bm.active = true;
         }
 
