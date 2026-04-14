@@ -266,6 +266,21 @@
         <input type="range" id="brushRange" min="1" max="12" value="2" step="1">
         <span class="val" id="brushVal">2</span>
       </div>
+      <div class="slider-row">
+        <label>Spray density</label>
+        <input type="range" id="sprayDensityRange" min="8" max="120" value="44" step="1">
+        <span class="val" id="sprayDensityVal">44</span>
+      </div>
+      <div class="slider-row">
+        <label>Drip threshold</label>
+        <input type="range" id="sprayDripThresholdRange" min="8" max="120" value="28" step="1">
+        <span class="val" id="sprayDripThresholdVal">0.28</span>
+      </div>
+      <div class="slider-row">
+        <label>Drip speed</label>
+        <input type="range" id="sprayDripSpeedRange" min="4" max="55" value="24" step="1">
+        <span class="val" id="sprayDripSpeedVal">0.24</span>
+      </div>
       <div class="checkbox-row">
         <input type="checkbox" id="drawModeCheck" checked>
         <label for="drawModeCheck">Enable draw on canvas</label>
@@ -374,9 +389,23 @@ var QUARTILE_RGB = [
 ];
 var DRAW_MASK_EPS = 1e-6;
 var brushRadiusPx = 2;
+var sprayDensity = 44;
+var sprayCoreStrength = 0.035;
+var sprayDotMinStrength = 0.015;
+var sprayDotMaxStrength = 0.11;
+var sprayHaloRadiusScale = 2.4;
+var sprayWetGain = 2.6;
+var sprayDripThreshold = 0.28;
+var sprayDripSpeed = 0.24;
+var sprayDripKick = 0.45;
+var sprayDripKeep = 0.88;
+var sprayDripWobble = 0.22;
+var sprayDripMinWidth = 0.7;
+var sprayDripTail = 0.18;
 var drawOnCanvasEnabled = true;
 var isDrawingStroke = false;
 var lastDrawGx = -1, lastDrawGy = -1;
+var activeStrokeErase = false;
 // Brush mask evolution: multi-pass diffusion turns the binary stamp into
 // a continuous gradient field, then the same sigmoid as A-D produces soft edges.
 var drawLifeProgressStep = 0.0009;
@@ -1190,6 +1219,11 @@ function initCanvas() {
   brushModels.forEach(function(bm) {
     bm.mask = new Float32Array(W * H);
     bm.maskNext = new Float32Array(W * H);
+    bm.accum = new Float32Array(W * H);
+    bm.drip = new Float32Array(W * H);
+    bm.dripNext = new Float32Array(W * H);
+    bm.dripWidth = new Float32Array(W * H);
+    bm.dripWidthNext = new Float32Array(W * H);
     bm.life = new Float32Array(W * H);
     bm.lifeNext = new Float32Array(W * H);
     bm.life.fill(1);
@@ -1276,6 +1310,11 @@ function upscaleSimulation2x() {
     brushModels.forEach(function(bm) {
       bm.mask = resizeFloat32Bilinear(bm.mask, oldW, oldH, newW, newH);
       bm.maskNext = new Float32Array(newW * newH);
+      bm.accum = resizeFloat32Bilinear(bm.accum || new Float32Array(oldW * oldH), oldW, oldH, newW, newH);
+      bm.drip = resizeFloat32Bilinear(bm.drip || new Float32Array(oldW * oldH), oldW, oldH, newW, newH);
+      bm.dripNext = new Float32Array(newW * newH);
+      bm.dripWidth = resizeFloat32Bilinear(bm.dripWidth || new Float32Array(oldW * oldH), oldW, oldH, newW, newH);
+      bm.dripWidthNext = new Float32Array(newW * newH);
       bm.life = resizeFloat32Bilinear(bm.life, oldW, oldH, newW, newH);
       bm.lifeNext = new Float32Array(newW * newH);
       bm.active = bm.active && bm.mask.some(function(v) { return v > DRAW_MASK_EPS; });
@@ -1325,39 +1364,99 @@ function clientToGrid(clientX, clientY) {
   return [gx, gy];
 }
 
+function pseudoRand01(v) {
+  var s = Math.sin(v) * 43758.5453123;
+  return s - Math.floor(s);
+}
+
+function depositSprayPixel(bm, x, y, strength, strokeToken) {
+  if (!bm) return;
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  if (strength <= 0) return;
+  var idx = y * W + x;
+  var nextMask = bm.mask[idx] + strength;
+  if (nextMask > 1) nextMask = 1;
+  bm.mask[idx] = nextMask;
+  bm.life[idx] = -drawHoldLifeOffset;
+  bm.active = true;
+  strokeModelMap[idx] = bm.id;
+  strokeOrderMap[idx] = strokeToken;
+  bm.accum[idx] += strength * sprayWetGain;
+  if (bm.accum[idx] > sprayDripThreshold) {
+    var overflow = bm.accum[idx] - sprayDripThreshold;
+    bm.drip[idx] += overflow * sprayDripKick;
+    bm.dripWidth[idx] = Math.max(bm.dripWidth[idx], Math.max(sprayDripMinWidth, brushRadiusPx * 0.6));
+    if (bm.drip[idx] > 1.5) bm.drip[idx] = 1.5;
+    bm.accum[idx] = sprayDripThreshold * 0.7;
+  }
+}
+
 function stampDisk(bm, cx, cy, erase, strokeToken) {
   if (!bm) return;
-  var r = brushRadiusPx;
-  var r2 = r * r;
-  var xMin = Math.max(0, Math.floor(cx - r - 1));
-  var xMax = Math.min(W - 1, Math.ceil(cx + r + 1));
-  var yMin = Math.max(0, Math.floor(cy - r - 1));
-  var yMax = Math.min(H - 1, Math.ceil(cy + r + 1));
-  var str = 1.0;
-  for (var yy = yMin; yy <= yMax; yy++) {
-    for (var xx = xMin; xx <= xMax; xx++) {
-      var dx = xx - cx, dy = yy - cy;
-      if (dx * dx + dy * dy <= r2) {
-        var idx = yy * W + xx;
-        if (erase) {
-          bm.mask[idx] -= str;
-          if (bm.mask[idx] < 0) {
-            bm.mask[idx] = 0;
-            bm.life[idx] = 1;
+  var r = Math.max(1, brushRadiusPx);
+  var xMin = Math.max(0, Math.floor(cx - r * sprayHaloRadiusScale - 2));
+  var xMax = Math.min(W - 1, Math.ceil(cx + r * sprayHaloRadiusScale + 2));
+  var yMin = Math.max(0, Math.floor(cy - r * sprayHaloRadiusScale - 2));
+  var yMax = Math.min(H - 1, Math.ceil(cy + r * sprayHaloRadiusScale + 2));
+
+  if (erase) {
+    var er2 = r * r;
+    for (var ey = yMin; ey <= yMax; ey++) {
+      for (var ex = xMin; ex <= xMax; ex++) {
+        var edx = ex - cx, edy = ey - cy;
+        var dist2 = edx * edx + edy * edy;
+        if (dist2 <= er2) {
+          var ei = ey * W + ex;
+          var falloff = 1 - Math.sqrt(dist2) / r;
+          var eraseW = 0.25 + 0.75 * falloff;
+          bm.mask[ei] -= eraseW;
+          bm.accum[ei] = 0;
+          bm.drip[ei] = 0;
+          if (bm.mask[ei] < 0) {
+            bm.mask[ei] = 0;
+            bm.life[ei] = 1;
           }
-          if (strokeModelMap[idx] === bm.id && bm.mask[idx] <= DRAW_MASK_EPS) {
-            strokeModelMap[idx] = -1;
-            strokeOrderMap[idx] = 0;
+          if (strokeModelMap[ei] === bm.id && bm.mask[ei] <= DRAW_MASK_EPS) {
+            strokeModelMap[ei] = -1;
+            strokeOrderMap[ei] = 0;
           }
-        } else {
-          if (bm.mask[idx] < str) bm.mask[idx] = str;
-          bm.life[idx] = -drawHoldLifeOffset;
-          bm.active = true;
-          strokeModelMap[idx] = bm.id;
-          strokeOrderMap[idx] = strokeToken;
         }
       }
     }
+    return;
+  }
+
+  // Dense core gives an airbrush center when cursor pauses.
+  var coreR = r * 0.9;
+  var coreR2 = coreR * coreR;
+  for (var yy = yMin; yy <= yMax; yy++) {
+    for (var xx = xMin; xx <= xMax; xx++) {
+      var dx = xx - cx, dy = yy - cy;
+      var d2 = dx * dx + dy * dy;
+      if (d2 <= coreR2) {
+        var t = 1 - Math.sqrt(d2) / coreR;
+        depositSprayPixel(bm, xx, yy, sprayCoreStrength * t * t, strokeToken);
+      }
+    }
+  }
+
+  // Randomized droplets mimic spray scatter.
+  var droplets = Math.max(6, Math.round(sprayDensity * (0.65 + r * 0.08)));
+  var spread = r * sprayHaloRadiusScale;
+  var twoPi = Math.PI * 2;
+  for (var i = 0; i < droplets; i++) {
+    var a = Math.random() * twoPi;
+    var radius = spread * Math.sqrt(Math.random());
+    var jitter = (Math.random() - 0.5) * 1.2;
+    var px = Math.round(cx + Math.cos(a) * radius + jitter);
+    var py = Math.round(cy + Math.sin(a) * radius + jitter);
+    var strength = sprayDotMinStrength + Math.random() * (sprayDotMaxStrength - sprayDotMinStrength);
+    if (Math.random() < 0.1) {
+      px += Math.round((Math.random() - 0.5) * r);
+      py += Math.round((Math.random() - 0.5) * r);
+      strength *= 0.6;
+    }
+    depositSprayPixel(bm, px, py, strength, strokeToken);
   }
 }
 
@@ -1371,12 +1470,85 @@ function evolveSingleBrushMask(bm) {
   if (!bm.active) return false;
   if (drawEvolveEveryNFrames > 1 && (renderFrame % drawEvolveEveryNFrames) !== 0) return false;
 
+  var changed = false;
+  if (bm.drip && bm.dripNext && bm.dripWidth && bm.dripWidthNext) {
+    bm.dripNext.fill(0);
+    bm.dripWidthNext.fill(0);
+    for (var sy = H - 2; sy >= 0; sy--) {
+      var srow = sy * W;
+      for (var sx = 0; sx < W; sx++) {
+        var si = srow + sx;
+        var charge = bm.drip[si];
+        if (charge <= 1e-4) continue;
+        var width = Math.max(sprayDripMinWidth, bm.dripWidth[si]);
+        var speedChance = Math.min(0.98, 0.28 + sprayDripSpeed * 1.6 + width * 0.08);
+        var moveRnd = pseudoRand01((si + 1) * 0.137 + renderFrame * 0.231);
+        if (moveRnd > speedChance) {
+          bm.dripNext[si] += charge * sprayDripKeep;
+          bm.dripWidthNext[si] = Math.max(bm.dripWidthNext[si], width);
+          continue;
+        }
+
+        var driftRnd = pseudoRand01((si + 1) * 0.17 + renderFrame * 0.11);
+        var driftX = 0;
+        if (driftRnd < sprayDripWobble * 0.5) driftX = -1;
+        else if (driftRnd > 1 - sprayDripWobble * 0.5) driftX = 1;
+        var tx = sx + driftX;
+        if (tx < 0) tx = 0;
+        if (tx >= W) tx = W - 1;
+        var ty = sy + 1;
+        var ti = ty * W + tx;
+
+        var transfer = Math.min(charge, 0.17 + width * 0.08);
+        if (transfer > 0) {
+          var core = transfer * 0.78;
+          var tail = transfer * sprayDripTail;
+          var side = transfer * Math.min(0.22, (width - sprayDripMinWidth) * 0.08);
+
+          var newMaskCenter = bm.mask[ti] + core;
+          if (newMaskCenter > 1) newMaskCenter = 1;
+          if (Math.abs(newMaskCenter - bm.mask[ti]) > 1e-6) changed = true;
+          bm.mask[ti] = newMaskCenter;
+
+          bm.mask[si] = Math.min(1, bm.mask[si] + tail);
+
+          if (tx > 0) {
+            var li = ti - 1;
+            bm.mask[li] = Math.min(1, bm.mask[li] + side);
+          }
+          if (tx < W - 1) {
+            var ri = ti + 1;
+            bm.mask[ri] = Math.min(1, bm.mask[ri] + side);
+          }
+
+          bm.accum[ti] += core * 0.6;
+          bm.life[ti] = Math.min(bm.life[ti], bm.life[si] - 0.01);
+          strokeModelMap[ti] = bm.id;
+          strokeOrderMap[ti] = Math.max(strokeOrderMap[ti], strokeOrderMap[si]);
+          bm.active = true;
+        }
+
+        var remaining = Math.max(0, charge - transfer * 0.85);
+        if (remaining > 1e-4) {
+          bm.dripNext[ti] += remaining * sprayDripKeep;
+          bm.dripWidthNext[ti] = Math.max(
+            bm.dripWidthNext[ti],
+            Math.max(sprayDripMinWidth, width + (Math.floor(Math.random() * 3) - 1) * 0.25)
+          );
+        }
+        bm.dripNext[si] += charge * 0.03;
+        bm.dripWidthNext[si] = Math.max(bm.dripWidthNext[si], width * 0.92);
+      }
+    }
+    var dtmp = bm.drip; bm.drip = bm.dripNext; bm.dripNext = dtmp;
+    var wtmp = bm.dripWidth; bm.dripWidth = bm.dripWidthNext; bm.dripWidthNext = wtmp;
+  }
+
   var avgLife = 0, activePx = 0;
   for (var qi = 0; qi < W * H; qi++) {
     if (bm.mask[qi] > DRAW_MASK_EPS) { avgLife += bm.life[qi]; activePx++; }
   }
   avgLife = activePx > 0 ? avgLife / activePx : 0;
-  var changed = false;
   var nPasses = 0;
   if (avgLife >= 0) {
     var avgEdgeEase = cubicBezier01(avgLife, drawEdgeBezierP1, drawEdgeBezierP2);
@@ -1455,6 +1627,11 @@ function evolveSingleBrushMask(bm) {
   if (!bm.active) {
     bm.mask.fill(0);
     bm.maskNext.fill(0);
+    bm.accum.fill(0);
+    bm.drip.fill(0);
+    bm.dripNext.fill(0);
+    bm.dripWidth.fill(0);
+    bm.dripWidthNext.fill(0);
     bm.life.fill(1);
     for (var ci = 0; ci < W * H; ci++) {
       if (strokeModelMap[ci] === bm.id) {
@@ -1488,6 +1665,16 @@ function paintSegment(bm, g0, g1, erase, strokeToken) {
   }
 }
 
+function sprayWhilePressing() {
+  if (!isDrawingStroke || !drawOnCanvasEnabled) return false;
+  if (lastDrawGx < 0 || lastDrawGy < 0) return false;
+  var bm = getSelectedBrushModel();
+  if (!bm) return false;
+  strokeCounter++;
+  stampDisk(bm, lastDrawGx, lastDrawGy, activeStrokeErase, strokeCounter);
+  return true;
+}
+
 function setupCanvasDrawing() {
   canvas.addEventListener('mousedown', function(e) {
     if (!drawOnCanvasEnabled || e.button !== 0) return;
@@ -1495,10 +1682,11 @@ function setupCanvasDrawing() {
     if (!bm) return;
     e.preventDefault();
     isDrawingStroke = true;
+    activeStrokeErase = !!e.shiftKey;
     strokeCounter++;
     var token = strokeCounter;
     var g = clientToGrid(e.clientX, e.clientY);
-    stampDisk(bm, g[0], g[1], e.shiftKey, token);
+    stampDisk(bm, g[0], g[1], activeStrokeErase, token);
     lastDrawGx = g[0];
     lastDrawGy = g[1];
     buildMaskTensor();
@@ -1507,13 +1695,14 @@ function setupCanvasDrawing() {
     if (!isDrawingStroke || !drawOnCanvasEnabled) return;
     var bm = getSelectedBrushModel();
     if (!bm) return;
+    activeStrokeErase = !!e.shiftKey;
     strokeCounter++;
     var token = strokeCounter;
     var g = clientToGrid(e.clientX, e.clientY);
     if (lastDrawGx >= 0 && (lastDrawGx !== g[0] || lastDrawGy !== g[1])) {
-      paintSegment(bm, [lastDrawGx, lastDrawGy], g, e.shiftKey, token);
+      paintSegment(bm, [lastDrawGx, lastDrawGy], g, activeStrokeErase, token);
     } else {
-      stampDisk(bm, g[0], g[1], e.shiftKey, token);
+      stampDisk(bm, g[0], g[1], activeStrokeErase, token);
     }
     lastDrawGx = g[0];
     lastDrawGy = g[1];
@@ -1521,6 +1710,7 @@ function setupCanvasDrawing() {
   });
   window.addEventListener('mouseup', function() {
     isDrawingStroke = false;
+    activeStrokeErase = false;
     lastDrawGx = -1;
     lastDrawGy = -1;
   });
@@ -1730,6 +1920,9 @@ function render(ts) {
 
   renderFrame++;
   var needRebuildMask = false;
+  if (sprayWhilePressing()) {
+    needRebuildMask = true;
+  }
   if (noiseAnimate && renderFrame % noiseAnimateEveryNFrames === 0) {
     var dtScale60 = frameDtMs / (1000 / 60);
     noiseTime += noiseTimeSpeed * noiseAnimateStepScale * dtScale60;
@@ -1839,6 +2032,11 @@ function handleBrushModelFile(file) {
         color: color,
         mask: new Float32Array(W * H),
         maskNext: new Float32Array(W * H),
+        accum: new Float32Array(W * H),
+        drip: new Float32Array(W * H),
+        dripNext: new Float32Array(W * H),
+        dripWidth: new Float32Array(W * H),
+        dripWidthNext: new Float32Array(W * H),
         life: new Float32Array(W * H),
         lifeNext: new Float32Array(W * H),
         active: false
@@ -1981,6 +2179,18 @@ document.getElementById('brushRange').oninput = function(e) {
   brushRadiusPx = parseInt(e.target.value, 10);
   document.getElementById('brushVal').textContent = String(brushRadiusPx);
 };
+document.getElementById('sprayDensityRange').oninput = function(e) {
+  sprayDensity = parseInt(e.target.value, 10);
+  document.getElementById('sprayDensityVal').textContent = String(sprayDensity);
+};
+document.getElementById('sprayDripThresholdRange').oninput = function(e) {
+  sprayDripThreshold = parseInt(e.target.value, 10) / 100;
+  document.getElementById('sprayDripThresholdVal').textContent = sprayDripThreshold.toFixed(2);
+};
+document.getElementById('sprayDripSpeedRange').oninput = function(e) {
+  sprayDripSpeed = parseInt(e.target.value, 10) / 100;
+  document.getElementById('sprayDripSpeedVal').textContent = sprayDripSpeed.toFixed(2);
+};
 document.getElementById('drawModeCheck').onchange = function(e) {
   drawOnCanvasEnabled = e.target.checked;
 };
@@ -2007,6 +2217,11 @@ document.getElementById('clearDrawMaskBtn').onclick = function() {
   if (!bm) return;
   bm.mask.fill(0);
   bm.maskNext.fill(0);
+  bm.accum.fill(0);
+  bm.drip.fill(0);
+  bm.dripNext.fill(0);
+  bm.dripWidth.fill(0);
+  bm.dripWidthNext.fill(0);
   bm.life.fill(1);
   bm.lifeNext.fill(1);
   bm.active = false;
