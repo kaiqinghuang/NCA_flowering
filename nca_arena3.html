@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NCA Arena - Multi-Model Interaction</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f5f5f5; color: #222; min-height: 100vh; }
+
+  .header { background: #fff; padding: 14px 24px; border-bottom: 1px solid #ddd;
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-size: 18px; color: #111; }
+  #status { font-size: 13px; color: #555; }
+
+  .main { display: flex; gap: 16px; padding: 16px; max-width: 2400px; margin: 0 auto; }
+
+  .sidebar { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: #fff; border-radius: 8px; padding: 14px; border: 1px solid #ddd; }
+  .panel h3 { font-size: 12px; color: #333; margin-bottom: 10px; text-transform: uppercase;
+              letter-spacing: 1px; font-weight: 700; }
+
+  .drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 16px; text-align: center;
+               color: #999; font-size: 12px; cursor: pointer; transition: all 0.2s; margin-bottom: 8px; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #666; color: #666; }
+  .drop-zone input { display: none; }
+
+  .model-list { display: flex; flex-direction: column; gap: 4px; }
+  .model-item { padding: 8px 10px; background: #f5f5f5; border-radius: 6px; cursor: pointer;
+                border: 3px solid transparent; transition: all 0.15s; font-size: 12px;
+                display: flex; align-items: center; gap: 8px; }
+  .model-item:hover { background: #eee; }
+  .model-item.selected { border-color: #222; background: #e8e8e8; }
+  .model-color { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+  .model-info { flex: 1; }
+  .model-info .name { font-weight: 600; color: #111; font-size: 12px; }
+  .model-info .meta { color: #888; font-size: 10px; }
+
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .btn { padding: 5px 10px; border: 1px solid #ccc; border-radius: 5px; background: #fff;
+         color: #333; cursor: pointer; font-size: 11px; transition: all 0.15s; }
+  .btn:hover { background: #eee; border-color: #999; }
+
+  .slider-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 11px; }
+  .slider-row label { width: 60px; color: #555; }
+  .slider-row input[type=range] { flex: 1; accent-color: #333; }
+  .slider-row .val { width: 32px; text-align: right; color: #111; font-weight: 600; font-size: 11px; }
+
+  .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 12px; }
+  .checkbox-row input { accent-color: #333; }
+
+  .radio-row { display: flex; gap: 12px; margin: 6px 0; font-size: 12px; }
+  .radio-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+  .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
+  canvas { border: 1px solid #ccc; border-radius: 8px; cursor: crosshair;
+           image-rendering: pixelated; background: #fff; }
+  #info { font-size: 11px; color: #999; margin-top: 6px; }
+  .help { font-size: 11px; color: #999; margin-top: 6px; line-height: 1.5; }
+
+  .size-row { display: flex; gap: 6px; align-items: center; font-size: 12px; margin-bottom: 8px; }
+  .size-row input[type=number] { width: 55px; padding: 3px 6px; border: 1px solid #ccc;
+    border-radius: 4px; font-size: 12px; }
+  .note { font-size: 10px; color: #999; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>NCA Arena</h1>
+  <div id="status">Load models to start</div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Models (CH=16 only)</h3>
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" accept=".json" multiple>
+        Drop .json models here
+      </div>
+      <div class="model-list" id="modelList"></div>
+      <div class="btn-row">
+        <button class="btn" id="removeBtn">Remove</button>
+      </div>
+      <div class="note">Click a model to select it as your brush. Shift+click canvas to plant its seed.</div>
+    </div>
+
+    <div class="panel">
+      <h3>Canvas</h3>
+      <div class="size-row">
+        <label>W:</label><input type="number" id="gridW" value="960" min="32" max="3840">
+        <label>H:</label><input type="number" id="gridH" value="540" min="32" max="2160">
+        <button class="btn" id="resizeBtn">Resize</button>
+      </div>
+      <div class="note">Resize clears the canvas</div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="radio-row">
+        <label><input type="radio" name="tool" value="damage" checked> Damage</label>
+        <label><input type="radio" name="tool" value="seed"> Plant Seed</label>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="resetBtn">Clear All</button>
+        <button class="btn" id="damageBtn">Damage Center</button>
+      </div>
+      <div class="slider-row">
+        <label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="10" value="4" step="0.5">
+        <span class="val" id="zoomVal">4</span>
+      </div>
+      <div class="slider-row">
+        <label>Speed</label>
+        <input type="range" id="speedRange" min="1" max="16" value="1">
+        <span class="val" id="speedVal">1</span>
+      </div>
+      <div class="slider-row">
+        <label>Brush</label>
+        <input type="range" id="brushRange" min="1" max="30" value="5">
+        <span class="val" id="brushVal">5</span>
+      </div>
+      <div class="slider-row">
+        <label>Threshold</label>
+        <input type="range" id="threshRange" min="0.01" max="1.0" value="0.1" step="0.01">
+        <span class="val" id="threshVal">0.1</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="activeCheck" checked>
+        <label>Running</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="showOwnerCheck">
+        <label>Show territory overlay</label>
+      </div>
+    </div>
+
+
+  </div>
+
+  <div class="canvas-area">
+    <canvas id="canvas"></canvas>
+    <div id="info"></div>
+    <div class="help">
+      Select a model on the left, then Shift+click (or use Plant Seed tool) on canvas to place its seed.<br>
+      Left-click drag with Damage tool to erase. Models share the canvas and compete for territory.
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script>
+"use strict";
+
+// Model colors for territory overlay
+var MODEL_COLORS = [
+  [0,0,0,0],           // 0 = unowned (transparent)
+  [255,80,80,60],       // model 1 - red
+  [80,80,255,60],       // model 2 - blue
+  [80,200,80,60],       // model 3 - green
+  [255,200,40,60],      // model 4 - yellow
+  [200,80,255,60],      // model 5 - purple
+  [255,150,50,60],      // model 6 - orange
+  [80,220,220,60],      // model 7 - cyan
+  [220,120,180,60],     // model 8 - pink
+];
+var MODEL_BORDER_COLORS = [
+  '#ccc','#e55','#55e','#4b4','#cc4','#b5e','#e94','#4cc','#d8b'
+];
+
+var CH = 16;  // all models must be CH=16
+
+// State
+var loadedModels = [];  // [{name, data, dense1k, dense1b, dense2k, dense2b, hidden}]
+var selectedModelIdx = 0;
+var GW = 960, GH = 540;
+
+var state = null;       // tf.variable [1, GH, GW, CH]
+var ownerMap = null;    // Uint8Array [GH * GW], 0=unowned, 1..N=model index+1
+var perceptionKernel = null;
+
+var zoom = 4, stepsPerFrame = 1, brushSize = 5;
+var isActive = true, isDragging = false, stepCount = 0;
+var livingThreshold = 0.1;
+var showOwner = false;
+var currentTool = 'damage';
+var animId = null;
+
+var statusEl = document.getElementById('status');
+var infoEl = document.getElementById('info');
+var modelListEl = document.getElementById('modelList');
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+
+// ====== Init ======
+async function initTF() {
+  try {
+    await tf.setBackend('webgl');
+    await tf.ready();
+  } catch(e) {
+    await tf.setBackend('cpu');
+    await tf.ready();
+  }
+  statusEl.textContent = 'Backend: ' + tf.getBackend();
+  initCanvas();
+}
+
+function buildPerceptionKernel() {
+  if (perceptionKernel) perceptionKernel.dispose();
+  var identify = [0,0,0, 0,1,0, 0,0,0];
+  var dx = [-1/8,0,1/8, -2/8,0,2/8, -1/8,0,1/8];
+  var dy = [-1/8,-2/8,-1/8, 0,0,0, 1/8,2/8,1/8];
+  var data = new Float32Array(3 * 3 * CH * 3);
+  for (var c = 0; c < CH; c++) {
+    for (var p = 0; p < 9; p++) {
+      data[p * CH * 3 + c * 3 + 0] = identify[p];
+      data[p * CH * 3 + c * 3 + 1] = dx[p];
+      data[p * CH * 3 + c * 3 + 2] = dy[p];
+    }
+  }
+  perceptionKernel = tf.tensor4d(data, [3, 3, CH, 3]);
+}
+
+function initCanvas() {
+  if (state) state.dispose();
+  state = tf.variable(tf.zeros([1, GH, GW, CH]));
+  ownerMap = new Uint8Array(GH * GW);
+  buildPerceptionKernel();
+  canvas.width = GW;
+  canvas.height = GH;
+  updateCanvasSize();
+  stepCount = 0;
+  if (!animId) render();
+}
+
+function updateCanvasSize() {
+  canvas.style.width = Math.round(GW * zoom) + 'px';
+  canvas.style.height = Math.round(GH * zoom) + 'px';
+}
+
+// ====== Model loading ======
+function decodeWeight(wInfo) {
+  var bytes = Uint8Array.from(atob(wInfo.data), function(c) { return c.charCodeAt(0); });
+  var floats = new Float32Array(bytes.buffer);
+  return tf.tensor(floats, wInfo.shape);
+}
+
+function addModel(name, data) {
+  if (data.channel_n !== CH) {
+    alert('Model "' + name + '" has CH=' + data.channel_n + ', but arena requires CH=' + CH);
+    return;
+  }
+  var m = {
+    name: name,
+    data: data,
+    dense1k: decodeWeight(data.weights[0]),
+    dense1b: decodeWeight(data.weights[1]),
+    dense2k: decodeWeight(data.weights[2]),
+    dense2b: decodeWeight(data.weights[3]),
+    hidden: data.weights[1].shape[0]
+  };
+  loadedModels.push(m);
+  refreshModelList();
+  if (loadedModels.length === 1) selectedModelIdx = 0;
+  statusEl.textContent = loadedModels.length + ' model(s) loaded | ' + tf.getBackend();
+}
+
+function refreshModelList() {
+  modelListEl.innerHTML = '';
+  loadedModels.forEach(function(m, i) {
+    var div = document.createElement('div');
+    div.className = 'model-item' + (i === selectedModelIdx ? ' selected' : '');
+    var colorIdx = (i + 1) < MODEL_BORDER_COLORS.length ? i + 1 : 1;
+    div.innerHTML =
+      '<div class="model-color" style="background:' + MODEL_BORDER_COLORS[colorIdx] + '"></div>' +
+      '<div class="model-info">' +
+        '<div class="name">' + m.name + '</div>' +
+        '<div class="meta">Hidden=' + m.hidden + ' | ' + m.data.grid_w + 'x' + m.data.grid_h + '</div>' +
+      '</div>';
+    div.onclick = function() {
+      selectedModelIdx = i;
+      refreshModelList();
+    };
+    modelListEl.appendChild(div);
+  });
+}
+
+// ====== NCA Step ======
+function getLivingMask(x) {
+  var alpha = x.slice([0,0,0,3], [-1,-1,-1,1]);
+  var pooled = tf.maxPool(alpha, 3, 1, 'same');
+  return pooled.greater(livingThreshold);
+}
+
+function ncaStep() {
+  if (loadedModels.length === 0) return;
+
+  // Build owner mask tensors for each model
+  var ownerMasks = [];  // [numModels] each [1, GH, GW, 1] float
+  for (var mi = 0; mi < loadedModels.length; mi++) {
+    var maskData = new Float32Array(GH * GW);
+    var modelId = mi + 1;
+    for (var j = 0; j < GH * GW; j++) {
+      maskData[j] = (ownerMap[j] === modelId) ? 1.0 : 0.0;
+    }
+    ownerMasks.push(tf.tensor4d(maskData, [1, GH, GW, 1]));
+  }
+
+  tf.tidy(function() {
+    var x = state;
+    var preLifeMask = getLivingMask(x);
+
+    // Shared perception
+    var perceived = tf.depthwiseConv2d(x, perceptionKernel, 1, 'same');
+
+    // Compute dx for each model, masked
+    var combinedDx = tf.zeros([1, GH, GW, CH]);
+
+    for (var mi = 0; mi < loadedModels.length; mi++) {
+      var m = loadedModels[mi];
+      var h1 = tf.relu(tf.add(tf.conv2d(perceived, m.dense1k, 1, 'same'), m.dense1b));
+      var dxM = tf.add(tf.conv2d(h1, m.dense2k, 1, 'same'), m.dense2b);
+      // Apply only to cells owned by this model
+      var masked = tf.mul(dxM, ownerMasks[mi]);
+      combinedDx = tf.add(combinedDx, masked);
+    }
+
+    // Stochastic update
+    var updateMask = tf.randomUniform([1, GH, GW, 1]).lessEqual(0.5);
+    var updated = tf.add(x, tf.mul(combinedDx, tf.cast(updateMask, 'float32')));
+
+    // Life mask
+    var postLifeMask = getLivingMask(updated);
+    var lifeMask = tf.logicalAnd(preLifeMask, postLifeMask);
+    var result = tf.mul(updated, tf.cast(lifeMask, 'float32'));
+
+    state.assign(result);
+
+    // Propagate ownership: cells that just became alive get nearest owner
+    var aliveNow = postLifeMask.dataSync();
+    propagateOwnership(aliveNow);
+  });
+
+  // Dispose
+  ownerMasks.forEach(function(t) { t.dispose(); });
+}
+
+function propagateOwnership(aliveData) {
+  // For cells that are alive but unowned, find nearest owned neighbor
+  var newOwner = new Uint8Array(ownerMap);
+  for (var y = 0; y < GH; y++) {
+    for (var x = 0; x < GW; x++) {
+      var idx = y * GW + x;
+      if (aliveData[idx] > 0 && ownerMap[idx] === 0) {
+        // Check 3x3 neighborhood for an owner
+        var counts = new Uint8Array(loadedModels.length + 1);
+        for (var dy = -1; dy <= 1; dy++) {
+          for (var dx = -1; dx <= 1; dx++) {
+            var ny = y + dy, nx = x + dx;
+            if (ny >= 0 && ny < GH && nx >= 0 && nx < GW) {
+              var nid = ownerMap[ny * GW + nx];
+              if (nid > 0) counts[nid]++;
+            }
+          }
+        }
+        // Assign most common neighbor owner
+        var best = 0, bestCount = 0;
+        for (var k = 1; k < counts.length; k++) {
+          if (counts[k] > bestCount) { bestCount = counts[k]; best = k; }
+        }
+        if (best > 0) newOwner[idx] = best;
+      }
+      // Clear ownership for dead cells
+      if (aliveData[idx] <= 0) {
+        newOwner[idx] = 0;
+      }
+    }
+  }
+  ownerMap = newOwner;
+}
+
+// ====== Interaction ======
+function plantSeed(px, py, modelIdx) {
+  if (modelIdx < 0 || modelIdx >= loadedModels.length) return;
+  if (px < 0 || px >= GW || py < 0 || py >= GH) return;
+  tf.tidy(function() {
+    var buf = tf.buffer([1, GH, GW, CH]);
+    for (var c = 3; c < CH; c++) {
+      buf.set(1.0, 0, py, px, c);
+    }
+    state.assign(tf.add(state, buf.toTensor()));
+  });
+  ownerMap[py * GW + px] = modelIdx + 1;
+}
+
+function damageArea(cx, cy, radius) {
+  tf.tidy(function() {
+    var xs = tf.range(0, GW).expandDims(0);
+    var ys = tf.range(0, GH).expandDims(1);
+    var distSq = tf.add(
+      tf.square(tf.sub(xs, cx).div(radius)),
+      tf.square(tf.sub(ys, cy).div(radius))
+    );
+    var mask = distSq.greater(1.0).expandDims(0).expandDims(-1);
+    state.assign(tf.mul(state, tf.cast(mask, 'float32')));
+  });
+  // Clear ownership in damaged area
+  for (var y = 0; y < GH; y++) {
+    for (var x = 0; x < GW; x++) {
+      var dx = (x - cx) / radius, dy2 = (y - cy) / radius;
+      if (dx*dx + dy2*dy2 < 1.0) {
+        ownerMap[y * GW + x] = 0;
+      }
+    }
+  }
+}
+
+// ====== Render ======
+function render() {
+  if (isActive && state && loadedModels.length > 0) {
+    for (var i = 0; i < stepsPerFrame; i++) {
+      ncaStep();
+      stepCount++;
+    }
+  }
+
+  if (state) {
+    tf.tidy(function() {
+      var alpha = state.slice([0,0,0,3], [-1,-1,-1,1]);
+      var rgb = tf.add(tf.sub(1.0, alpha), state.slice([0,0,0,0], [-1,-1,-1,3]));
+      var vis = tf.clipByValue(rgb, 0, 1).mul(255);
+      var data = vis.dataSync();
+      var imgData = new ImageData(GW, GH);
+      for (var i = 0; i < GW * GH; i++) {
+        imgData.data[i*4+0] = data[i*3+0];
+        imgData.data[i*4+1] = data[i*3+1];
+        imgData.data[i*4+2] = data[i*3+2];
+        imgData.data[i*4+3] = 255;
+      }
+
+      // Territory overlay
+      if (showOwner) {
+        for (var j = 0; j < GW * GH; j++) {
+          var oid = ownerMap[j];
+          if (oid > 0 && oid < MODEL_COLORS.length) {
+            var c = MODEL_COLORS[oid];
+            var a = c[3] / 255;
+            imgData.data[j*4+0] = Math.round(imgData.data[j*4+0] * (1-a) + c[0] * a);
+            imgData.data[j*4+1] = Math.round(imgData.data[j*4+1] * (1-a) + c[1] * a);
+            imgData.data[j*4+2] = Math.round(imgData.data[j*4+2] * (1-a) + c[2] * a);
+          }
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+    });
+  }
+
+  // Count territories
+  var counts = new Array(loadedModels.length).fill(0);
+  for (var j = 0; j < GH * GW; j++) {
+    var o = ownerMap[j];
+    if (o > 0 && o <= loadedModels.length) counts[o-1]++;
+  }
+  var territoryStr = loadedModels.map(function(m, i) {
+    return m.name + ': ' + counts[i];
+  }).join(' | ');
+
+  infoEl.textContent = 'Steps: ' + stepCount + ' | ' + territoryStr + ' | Tensors: ' + tf.memory().numTensors;
+  animId = requestAnimationFrame(render);
+}
+
+// ====== File handling ======
+function handleFiles(files) {
+  Array.from(files).forEach(function(file) {
+    if (!file.name.endsWith('.json')) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = JSON.parse(e.target.result);
+        if (!data.weights || !data.grid_h || !data.channel_n) {
+          alert('Invalid model: ' + file.name);
+          return;
+        }
+        addModel(file.name.replace('.json', ''), data);
+      } catch(err) {
+        alert('Parse error: ' + file.name + '\n' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  });
+}
+
+// ====== Events ======
+var dropZone = document.getElementById('dropZone');
+var fileInput = document.getElementById('fileInput');
+dropZone.onclick = function() { fileInput.click(); };
+fileInput.onchange = function(e) { handleFiles(e.target.files); };
+dropZone.ondragover = function(e) { e.preventDefault(); dropZone.classList.add('drag-over'); };
+dropZone.ondragleave = function() { dropZone.classList.remove('drag-over'); };
+dropZone.ondrop = function(e) {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+};
+
+document.querySelectorAll('input[name=tool]').forEach(function(r) {
+  r.onchange = function() { currentTool = r.value; };
+});
+
+document.getElementById('resetBtn').onclick = function() { initCanvas(); };
+document.getElementById('damageBtn').onclick = function() {
+  if (state) damageArea(GW/2, GH/2, Math.min(GW,GH)*0.2);
+};
+document.getElementById('activeCheck').onchange = function(e) { isActive = e.target.checked; };
+document.getElementById('showOwnerCheck').onchange = function(e) { showOwner = e.target.checked; };
+
+document.getElementById('zoomRange').oninput = function(e) {
+  zoom = parseFloat(e.target.value);
+  document.getElementById('zoomVal').textContent = zoom;
+  updateCanvasSize();
+};
+document.getElementById('speedRange').oninput = function(e) {
+  stepsPerFrame = parseInt(e.target.value);
+  document.getElementById('speedVal').textContent = stepsPerFrame;
+};
+document.getElementById('brushRange').oninput = function(e) {
+  brushSize = parseInt(e.target.value);
+  document.getElementById('brushVal').textContent = brushSize;
+};
+document.getElementById('threshRange').oninput = function(e) {
+  livingThreshold = parseFloat(e.target.value);
+  document.getElementById('threshVal').textContent = livingThreshold;
+};
+document.getElementById('resizeBtn').onclick = function() {
+  GW = parseInt(document.getElementById('gridW').value) || 960;
+  GH = parseInt(document.getElementById('gridH').value) || 540;
+  GW = Math.max(32, Math.min(3840, GW));
+  GH = Math.max(32, Math.min(2160, GH));
+  initCanvas();
+};
+
+document.getElementById('removeBtn').onclick = function() {
+  if (loadedModels.length === 0) return;
+  var m = loadedModels[selectedModelIdx];
+  if (m) { m.dense1k.dispose(); m.dense1b.dispose(); m.dense2k.dispose(); m.dense2b.dispose(); }
+  loadedModels.splice(selectedModelIdx, 1);
+  // Clear ownership for removed model
+  var removedId = selectedModelIdx + 1;
+  for (var j = 0; j < GH * GW; j++) {
+    if (ownerMap[j] === removedId) ownerMap[j] = 0;
+    else if (ownerMap[j] > removedId) ownerMap[j]--;
+  }
+  selectedModelIdx = Math.min(selectedModelIdx, loadedModels.length - 1);
+  refreshModelList();
+  statusEl.textContent = loadedModels.length + ' model(s) loaded';
+};
+
+function getGridPos(e) {
+  var rect = canvas.getBoundingClientRect();
+  return [
+    Math.floor((e.clientX - rect.left) / rect.width * GW),
+    Math.floor((e.clientY - rect.top) / rect.height * GH)
+  ];
+}
+
+canvas.onmousedown = function(e) {
+  if (!state) return;
+  e.preventDefault();
+  var pos = getGridPos(e);
+  if (currentTool === 'seed' || e.shiftKey) {
+    plantSeed(pos[0], pos[1], selectedModelIdx);
+  } else {
+    isDragging = true;
+    damageArea(pos[0], pos[1], brushSize);
+  }
+};
+canvas.onmousemove = function(e) {
+  if (!isDragging || !state) return;
+  var pos = getGridPos(e);
+  if (currentTool === 'seed' || e.shiftKey) {
+    plantSeed(pos[0], pos[1], selectedModelIdx);
+  } else {
+    damageArea(pos[0], pos[1], brushSize);
+  }
+};
+canvas.onmouseup = function() { isDragging = false; };
+canvas.onmouseleave = function() { isDragging = false; };
+
+canvas.ontouchstart = function(e) {
+  if (!state) return; e.preventDefault();
+  var pos = getGridPos(e.touches[0]);
+  isDragging = true;
+  if (currentTool === 'seed') plantSeed(pos[0], pos[1], selectedModelIdx);
+  else damageArea(pos[0], pos[1], brushSize);
+};
+canvas.ontouchmove = function(e) {
+  if (!isDragging || !state) return; e.preventDefault();
+  var pos = getGridPos(e.touches[0]);
+  if (currentTool === 'seed') plantSeed(pos[0], pos[1], selectedModelIdx);
+  else damageArea(pos[0], pos[1], brushSize);
+};
+canvas.ontouchend = function() { isDragging = false; };
+
+initTF();
+</script>
+</body>
+</html>

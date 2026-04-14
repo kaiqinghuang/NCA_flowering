@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NCA Layers - Multi-Model with Inter-Layer Coupling</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f5f5f5; color: #222; min-height: 100vh; }
+
+  .header { background: #fff; padding: 14px 24px; border-bottom: 1px solid #ddd;
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-size: 18px; color: #111; }
+  #status { font-size: 13px; color: #555; }
+
+  .main { display: flex; gap: 16px; padding: 16px; max-width: 1400px; margin: 0 auto; }
+
+  .sidebar { width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: #fff; border-radius: 8px; padding: 14px; border: 1px solid #ddd; }
+  .panel h3 { font-size: 12px; color: #333; margin-bottom: 10px; text-transform: uppercase;
+              letter-spacing: 1px; font-weight: 700; }
+
+  .drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 16px; text-align: center;
+               color: #999; font-size: 12px; cursor: pointer; transition: all 0.2s; margin-bottom: 8px; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #666; color: #666; }
+  .drop-zone input { display: none; }
+
+  .model-list { display: flex; flex-direction: column; gap: 4px; }
+  .model-item { padding: 8px 10px; background: #f5f5f5; border-radius: 6px; cursor: pointer;
+                border: 3px solid transparent; transition: all 0.15s; font-size: 12px;
+                display: flex; align-items: center; gap: 8px; }
+  .model-item:hover { background: #eee; }
+  .model-item.selected { border-color: #222; background: #e8e8e8; }
+  .model-info { flex: 1; }
+  .model-info .name { font-weight: 600; color: #111; font-size: 12px; }
+  .model-info .meta { color: #888; font-size: 10px; }
+  .model-btns { display: flex; flex-direction: column; gap: 2px; }
+  .model-btns button { width: 22px; height: 18px; font-size: 10px; border: 1px solid #ccc;
+    background: #fff; border-radius: 3px; cursor: pointer; line-height: 1; padding: 0; color: #555; }
+  .model-btns button:hover { background: #eee; border-color: #999; }
+
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .btn { padding: 5px 10px; border: 1px solid #ccc; border-radius: 5px; background: #fff;
+         color: #333; cursor: pointer; font-size: 11px; transition: all 0.15s; }
+  .btn:hover { background: #eee; border-color: #999; }
+
+  .slider-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 11px; }
+  .slider-row label { width: 70px; color: #555; flex-shrink: 0; }
+  .slider-row input[type=range] { flex: 1; accent-color: #333; }
+  .slider-row .val { width: 36px; text-align: right; color: #111; font-weight: 600; font-size: 11px; }
+
+  .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 12px; }
+  .checkbox-row input { accent-color: #333; }
+
+  .radio-row { display: flex; gap: 12px; margin: 6px 0; font-size: 12px; }
+  .radio-row label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+  .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
+  canvas { border: 1px solid #ccc; border-radius: 8px; cursor: crosshair;
+           image-rendering: pixelated; background: #fff; }
+  #info { font-size: 11px; color: #999; margin-top: 6px; }
+  .help { font-size: 11px; color: #999; margin-top: 6px; line-height: 1.5; }
+
+  .size-row { display: flex; gap: 6px; align-items: center; font-size: 12px; margin-bottom: 8px; }
+  .size-row input[type=number] { width: 55px; padding: 3px 6px; border: 1px solid #ccc;
+    border-radius: 4px; font-size: 12px; }
+  .note { font-size: 10px; color: #999; margin-top: 4px; }
+
+  .blend-label { font-size: 11px; color: #555; margin-top: 8px; margin-bottom: 4px; }
+  .section-label { font-size: 11px; color: #555; margin-top: 10px; margin-bottom: 4px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>NCA Layers</h1>
+  <div id="status">Load models to start</div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Models / Layers</h3>
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" accept=".json" multiple>
+        Drop .json models here
+      </div>
+      <div class="model-list" id="modelList"></div>
+      <div class="btn-row">
+        <button class="btn" id="removeBtn">Remove</button>
+      </div>
+      <div class="note">Click to select. Use arrows to reorder. Adjacent layers interact via coupling.</div>
+    </div>
+
+    <div class="panel">
+      <h3>Canvas</h3>
+      <div class="size-row">
+        <label>W:</label><input type="number" id="gridW" value="128" min="32" max="512">
+        <label>H:</label><input type="number" id="gridH" value="128" min="32" max="512">
+        <button class="btn" id="resizeBtn">Resize</button>
+      </div>
+      <div class="note">Resize clears all layers</div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="radio-row">
+        <label><input type="radio" name="tool" value="damage" checked> Damage</label>
+        <label><input type="radio" name="tool" value="seed"> Plant Seed</label>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="clearAllBtn">Clear All</button>
+        <button class="btn" id="clearSelBtn">Clear Selected</button>
+        <button class="btn" id="damageBtn">Damage Center</button>
+      </div>
+      <div class="slider-row">
+        <label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="10" value="4" step="0.5">
+        <span class="val" id="zoomVal">4</span>
+      </div>
+      <div class="slider-row">
+        <label>Speed</label>
+        <input type="range" id="speedRange" min="1" max="16" value="1">
+        <span class="val" id="speedVal">1</span>
+      </div>
+      <div class="slider-row">
+        <label>Brush</label>
+        <input type="range" id="brushRange" min="1" max="30" value="5">
+        <span class="val" id="brushVal">5</span>
+      </div>
+      <div class="slider-row">
+        <label>Threshold</label>
+        <input type="range" id="threshRange" min="0.01" max="1.0" value="0.1" step="0.01">
+        <span class="val" id="threshVal">0.1</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="activeCheck" checked>
+        <label>Running</label>
+      </div>
+      <div class="blend-label">Blend mode:</div>
+      <div class="radio-row">
+        <label><input type="radio" name="blend" value="alpha" checked> Alpha</label>
+        <label><input type="radio" name="blend" value="add"> Additive</label>
+        <label><input type="radio" name="blend" value="max"> Max</label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Inter-Layer Coupling</h3>
+      <div class="slider-row">
+        <label>Coupling</label>
+        <input type="range" id="couplingRange" min="0" max="0.3" value="0.1" step="0.01">
+        <span class="val" id="couplingVal">0.10</span>
+      </div>
+      <div class="note">How much adjacent layers' state diffuses into each other per step. 0 = fully independent.</div>
+      <div class="radio-row" style="margin-top:8px;">
+        <label><input type="radio" name="cmode" value="diffusion" checked> Diffusion</label>
+        <label><input type="radio" name="cmode" value="perception"> Perception</label>
+      </div>
+      <div class="note" style="margin-top:4px;">
+        <b>Diffusion</b>: states blend between neighbors after each step.<br>
+        <b>Perception</b>: each layer perceives a mix of self + neighbor states.
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas-area">
+    <canvas id="canvas"></canvas>
+    <div id="info"></div>
+    <div class="help">
+      Each model runs on its own layer. Adjacent layers interact via coupling.<br>
+      Select a model, then Shift+click (or Plant Seed tool) to place its seed. Damage affects selected layer only.
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script>
+"use strict";
+
+var CH = 16;
+
+// Each loaded model: {name, data, dense1k, dense1b, dense2k, dense2b, hidden, state, perceptionKernel}
+var layers = [];
+var selectedIdx = 0;
+var GW = 128, GH = 128;
+
+var zoom = 4, stepsPerFrame = 1, brushSize = 5;
+var isActive = true, isDragging = false, stepCount = 0;
+var livingThreshold = 0.1;
+var blendMode = 'alpha';
+var currentTool = 'damage';
+var couplingStrength = 0.1;
+var couplingMode = 'diffusion'; // 'diffusion' or 'perception'
+var animId = null;
+
+var statusEl = document.getElementById('status');
+var infoEl = document.getElementById('info');
+var modelListEl = document.getElementById('modelList');
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+
+async function initTF() {
+  try {
+    await tf.setBackend('webgl');
+    await tf.ready();
+  } catch(e) {
+    await tf.setBackend('cpu');
+    await tf.ready();
+  }
+  statusEl.textContent = 'Backend: ' + tf.getBackend();
+  initCanvas();
+}
+
+function buildPerceptionKernel() {
+  var identify = [0,0,0, 0,1,0, 0,0,0];
+  var dx = [-1/8,0,1/8, -2/8,0,2/8, -1/8,0,1/8];
+  var dy = [-1/8,-2/8,-1/8, 0,0,0, 1/8,2/8,1/8];
+  var data = new Float32Array(3 * 3 * CH * 3);
+  for (var c = 0; c < CH; c++) {
+    for (var p = 0; p < 9; p++) {
+      data[p * CH * 3 + c * 3 + 0] = identify[p];
+      data[p * CH * 3 + c * 3 + 1] = dx[p];
+      data[p * CH * 3 + c * 3 + 2] = dy[p];
+    }
+  }
+  return tf.tensor4d(data, [3, 3, CH, 3]);
+}
+
+function initCanvas() {
+  layers.forEach(function(L) { if (L.state) L.state.dispose(); });
+  layers.forEach(function(L) {
+    L.state = tf.variable(tf.zeros([1, GH, GW, CH]));
+  });
+  canvas.width = GW;
+  canvas.height = GH;
+  updateCanvasSize();
+  stepCount = 0;
+  if (!animId) render();
+}
+
+function updateCanvasSize() {
+  canvas.style.width = Math.round(GW * zoom) + 'px';
+  canvas.style.height = Math.round(GH * zoom) + 'px';
+}
+
+// ====== Model loading ======
+function decodeWeight(wInfo) {
+  var bytes = Uint8Array.from(atob(wInfo.data), function(c) { return c.charCodeAt(0); });
+  var floats = new Float32Array(bytes.buffer);
+  return tf.tensor(floats, wInfo.shape);
+}
+
+function addLayer(name, data) {
+  if (data.channel_n !== CH) {
+    alert('"' + name + '" has CH=' + data.channel_n + ', need CH=' + CH);
+    return;
+  }
+  var L = {
+    name: name,
+    data: data,
+    dense1k: decodeWeight(data.weights[0]),
+    dense1b: decodeWeight(data.weights[1]),
+    dense2k: decodeWeight(data.weights[2]),
+    dense2b: decodeWeight(data.weights[3]),
+    hidden: data.weights[1].shape[0],
+    perceptionKernel: buildPerceptionKernel(),
+    state: tf.variable(tf.zeros([1, GH, GW, CH]))
+  };
+  layers.push(L);
+  refreshModelList();
+  if (layers.length === 1) selectedIdx = 0;
+  statusEl.textContent = layers.length + ' layer(s) | ' + tf.getBackend();
+}
+
+function refreshModelList() {
+  modelListEl.innerHTML = '';
+  layers.forEach(function(L, i) {
+    var div = document.createElement('div');
+    div.className = 'model-item' + (i === selectedIdx ? ' selected' : '');
+    div.innerHTML =
+      '<div class="model-info">' +
+        '<div class="name">L' + (i+1) + ': ' + L.name + '</div>' +
+        '<div class="meta">Hidden=' + L.hidden + ' | ' + L.data.grid_w + 'x' + L.data.grid_h + '</div>' +
+      '</div>' +
+      '<div class="model-btns">' +
+        '<button class="up-btn" title="Move up">&uarr;</button>' +
+        '<button class="dn-btn" title="Move down">&darr;</button>' +
+      '</div>';
+    div.querySelector('.model-info').onclick = function() { selectedIdx = i; refreshModelList(); };
+    div.querySelector('.up-btn').onclick = function(e) {
+      e.stopPropagation();
+      if (i > 0) {
+        var tmp = layers[i]; layers[i] = layers[i-1]; layers[i-1] = tmp;
+        if (selectedIdx === i) selectedIdx = i-1;
+        else if (selectedIdx === i-1) selectedIdx = i;
+        refreshModelList();
+      }
+    };
+    div.querySelector('.dn-btn').onclick = function(e) {
+      e.stopPropagation();
+      if (i < layers.length - 1) {
+        var tmp = layers[i]; layers[i] = layers[i+1]; layers[i+1] = tmp;
+        if (selectedIdx === i) selectedIdx = i+1;
+        else if (selectedIdx === i+1) selectedIdx = i;
+        refreshModelList();
+      }
+    };
+    modelListEl.appendChild(div);
+  });
+}
+
+// ====== NCA step ======
+function getLivingMask(x) {
+  var alpha = x.slice([0,0,0,3], [-1,-1,-1,1]);
+  var pooled = tf.maxPool(alpha, 3, 1, 'same');
+  return pooled.greater(livingThreshold);
+}
+
+// Standard NCA step (no coupling)
+function stepLayerStandard(L) {
+  tf.tidy(function() {
+    var x = L.state;
+    var preLifeMask = getLivingMask(x);
+    var perceived = tf.depthwiseConv2d(x, L.perceptionKernel, 1, 'same');
+    var h1 = tf.relu(tf.add(tf.conv2d(perceived, L.dense1k, 1, 'same'), L.dense1b));
+    var dx = tf.add(tf.conv2d(h1, L.dense2k, 1, 'same'), L.dense2b);
+    var updateMask = tf.randomUniform([1, GH, GW, 1]).lessEqual(0.5);
+    var updated = tf.add(x, tf.mul(dx, tf.cast(updateMask, 'float32')));
+    var postLifeMask = getLivingMask(updated);
+    var lifeMask = tf.logicalAnd(preLifeMask, postLifeMask);
+    L.state.assign(tf.mul(updated, tf.cast(lifeMask, 'float32')));
+  });
+}
+
+// NCA step with perception coupling: perceive a mix of self + neighbors
+function stepLayerPerception(L, idx) {
+  tf.tidy(function() {
+    var x = L.state;
+    var preLifeMask = getLivingMask(x);
+
+    // Build mixed perception input: (1-c)*self + c*avg(neighbors)
+    var inputState = x;
+    if (couplingStrength > 0.001 && layers.length > 1) {
+      var neighbors = [];
+      if (idx > 0) neighbors.push(layers[idx-1].state);
+      if (idx < layers.length - 1) neighbors.push(layers[idx+1].state);
+      if (neighbors.length > 0) {
+        var neighborAvg;
+        if (neighbors.length === 1) {
+          neighborAvg = neighbors[0];
+        } else {
+          neighborAvg = tf.div(tf.add(neighbors[0], neighbors[1]), 2.0);
+        }
+        inputState = tf.add(
+          tf.mul(x, 1.0 - couplingStrength),
+          tf.mul(neighborAvg, couplingStrength)
+        );
+      }
+    }
+
+    var perceived = tf.depthwiseConv2d(inputState, L.perceptionKernel, 1, 'same');
+    var h1 = tf.relu(tf.add(tf.conv2d(perceived, L.dense1k, 1, 'same'), L.dense1b));
+    var dx = tf.add(tf.conv2d(h1, L.dense2k, 1, 'same'), L.dense2b);
+    var updateMask = tf.randomUniform([1, GH, GW, 1]).lessEqual(0.5);
+    var updated = tf.add(x, tf.mul(dx, tf.cast(updateMask, 'float32')));
+    var postLifeMask = getLivingMask(updated);
+    var lifeMask = tf.logicalAnd(preLifeMask, postLifeMask);
+    L.state.assign(tf.mul(updated, tf.cast(lifeMask, 'float32')));
+  });
+}
+
+// After all layers step, apply diffusion between adjacent layers
+function applyDiffusion() {
+  if (couplingStrength < 0.001 || layers.length < 2) return;
+  tf.tidy(function() {
+    // Snapshot all current states
+    var snapshots = [];
+    for (var i = 0; i < layers.length; i++) {
+      snapshots.push(layers[i].state.clone());
+    }
+    // For each layer, blend toward neighbors
+    for (var i = 0; i < layers.length; i++) {
+      var self = snapshots[i];
+      var neighbors = [];
+      if (i > 0) neighbors.push(snapshots[i-1]);
+      if (i < layers.length - 1) neighbors.push(snapshots[i+1]);
+      if (neighbors.length > 0) {
+        var neighborAvg;
+        if (neighbors.length === 1) {
+          neighborAvg = neighbors[0];
+        } else {
+          neighborAvg = tf.div(tf.add(neighbors[0], neighbors[1]), 2.0);
+        }
+        // new_state = (1-c)*self + c*neighborAvg
+        var blended = tf.add(
+          tf.mul(self, 1.0 - couplingStrength),
+          tf.mul(neighborAvg, couplingStrength)
+        );
+        layers[i].state.assign(blended);
+      }
+    }
+    // Dispose snapshots
+    for (var i = 0; i < snapshots.length; i++) {
+      snapshots[i].dispose();
+    }
+  });
+}
+
+// ====== Interaction ======
+function plantSeed(px, py, layerIdx) {
+  if (layerIdx < 0 || layerIdx >= layers.length) return;
+  if (px < 0 || px >= GW || py < 0 || py >= GH) return;
+  var L = layers[layerIdx];
+  tf.tidy(function() {
+    var buf = tf.buffer([1, GH, GW, CH]);
+    for (var c = 3; c < CH; c++) {
+      buf.set(1.0, 0, py, px, c);
+    }
+    L.state.assign(tf.add(L.state, buf.toTensor()));
+  });
+}
+
+function damageLayer(layerIdx, cx, cy, radius) {
+  if (layerIdx < 0 || layerIdx >= layers.length) return;
+  var L = layers[layerIdx];
+  tf.tidy(function() {
+    var xs = tf.range(0, GW).expandDims(0);
+    var ys = tf.range(0, GH).expandDims(1);
+    var distSq = tf.add(
+      tf.square(tf.sub(xs, cx).div(radius)),
+      tf.square(tf.sub(ys, cy).div(radius))
+    );
+    var mask = distSq.greater(1.0).expandDims(0).expandDims(-1);
+    L.state.assign(tf.mul(L.state, tf.cast(mask, 'float32')));
+  });
+}
+
+function damageAllLayers(cx, cy, radius) {
+  for (var i = 0; i < layers.length; i++) {
+    damageLayer(i, cx, cy, radius);
+  }
+}
+
+// ====== Render: composite all layers ======
+function render() {
+  if (isActive && layers.length > 0) {
+    for (var s = 0; s < stepsPerFrame; s++) {
+      if (couplingMode === 'perception') {
+        // Perception mode: coupling is baked into the perception step
+        for (var i = 0; i < layers.length; i++) {
+          stepLayerPerception(layers[i], i);
+        }
+      } else {
+        // Diffusion mode: step independently, then diffuse
+        for (var i = 0; i < layers.length; i++) {
+          stepLayerStandard(layers[i]);
+        }
+        applyDiffusion();
+      }
+      stepCount++;
+    }
+  }
+
+  // Composite
+  var imgData = new ImageData(GW, GH);
+
+  if (layers.length > 0) {
+    var layerData = [];
+    for (var i = 0; i < layers.length; i++) {
+      tf.tidy(function() {
+        var st = layers[i].state;
+        var alpha = st.slice([0,0,0,3], [-1,-1,-1,1]);
+        var rgb = tf.add(tf.sub(1.0, alpha), st.slice([0,0,0,0], [-1,-1,-1,3]));
+        var vis = tf.clipByValue(rgb, 0, 1);
+        var a = tf.clipByValue(alpha, 0, 1);
+        layerData.push({
+          rgb: vis.dataSync(),
+          alpha: a.dataSync()
+        });
+      });
+    }
+
+    var n = GW * GH;
+    for (var p = 0; p < n; p++) {
+      var r = 1.0, g = 1.0, b = 1.0;
+
+      if (blendMode === 'alpha') {
+        for (var li = 0; li < layerData.length; li++) {
+          var ld = layerData[li];
+          var a = ld.alpha[p];
+          if (a > 0.001) {
+            var lr = ld.rgb[p*3+0];
+            var lg = ld.rgb[p*3+1];
+            var lb = ld.rgb[p*3+2];
+            r = lr * a + r * (1 - a);
+            g = lg * a + g * (1 - a);
+            b = lb * a + b * (1 - a);
+          }
+        }
+      } else if (blendMode === 'add') {
+        r = 0; g = 0; b = 0;
+        var totalA = 0;
+        for (var li = 0; li < layerData.length; li++) {
+          var ld = layerData[li];
+          var a = ld.alpha[p];
+          r += ld.rgb[p*3+0] * a;
+          g += ld.rgb[p*3+1] * a;
+          b += ld.rgb[p*3+2] * a;
+          totalA += a;
+        }
+        if (totalA < 0.001) { r = 1; g = 1; b = 1; }
+        else { r = Math.min(1, r); g = Math.min(1, g); b = Math.min(1, b); }
+      } else if (blendMode === 'max') {
+        var bestA = 0, bestLi = -1;
+        for (var li = 0; li < layerData.length; li++) {
+          if (layerData[li].alpha[p] > bestA) {
+            bestA = layerData[li].alpha[p];
+            bestLi = li;
+          }
+        }
+        if (bestLi >= 0 && bestA > 0.001) {
+          var ld = layerData[bestLi];
+          r = ld.rgb[p*3+0]; g = ld.rgb[p*3+1]; b = ld.rgb[p*3+2];
+          r = r * bestA + 1.0 * (1 - bestA);
+          g = g * bestA + 1.0 * (1 - bestA);
+          b = b * bestA + 1.0 * (1 - bestA);
+        }
+      }
+
+      imgData.data[p*4+0] = Math.round(Math.max(0, Math.min(1, r)) * 255);
+      imgData.data[p*4+1] = Math.round(Math.max(0, Math.min(1, g)) * 255);
+      imgData.data[p*4+2] = Math.round(Math.max(0, Math.min(1, b)) * 255);
+      imgData.data[p*4+3] = 255;
+    }
+
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  var modeStr = couplingMode === 'perception' ? 'Percept' : 'Diffuse';
+  infoEl.textContent = 'Steps: ' + stepCount + ' | Layers: ' + layers.length +
+    ' | Blend: ' + blendMode + ' | Coupling: ' + modeStr + ' ' + couplingStrength.toFixed(2) +
+    ' | Tensors: ' + tf.memory().numTensors;
+  animId = requestAnimationFrame(render);
+}
+
+// ====== File handling ======
+function handleFiles(files) {
+  Array.from(files).forEach(function(file) {
+    if (!file.name.endsWith('.json')) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = JSON.parse(e.target.result);
+        if (!data.weights || !data.grid_h || !data.channel_n) {
+          alert('Invalid model: ' + file.name); return;
+        }
+        addLayer(file.name.replace('.json', ''), data);
+      } catch(err) {
+        alert('Parse error: ' + file.name + '\n' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  });
+}
+
+// ====== Events ======
+var dropZone = document.getElementById('dropZone');
+var fileInput = document.getElementById('fileInput');
+dropZone.onclick = function() { fileInput.click(); };
+fileInput.onchange = function(e) { handleFiles(e.target.files); };
+dropZone.ondragover = function(e) { e.preventDefault(); dropZone.classList.add('drag-over'); };
+dropZone.ondragleave = function() { dropZone.classList.remove('drag-over'); };
+dropZone.ondrop = function(e) {
+  e.preventDefault(); dropZone.classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+};
+
+document.querySelectorAll('input[name=tool]').forEach(function(r) {
+  r.onchange = function() { currentTool = r.value; };
+});
+document.querySelectorAll('input[name=blend]').forEach(function(r) {
+  r.onchange = function() { blendMode = r.value; };
+});
+document.querySelectorAll('input[name=cmode]').forEach(function(r) {
+  r.onchange = function() { couplingMode = r.value; };
+});
+
+document.getElementById('clearAllBtn').onclick = function() { initCanvas(); };
+document.getElementById('clearSelBtn').onclick = function() {
+  if (selectedIdx >= 0 && selectedIdx < layers.length) {
+    tf.tidy(function() { layers[selectedIdx].state.assign(tf.zerosLike(layers[selectedIdx].state)); });
+  }
+};
+document.getElementById('damageBtn').onclick = function() {
+  damageAllLayers(GW/2, GH/2, Math.min(GW,GH)*0.2);
+};
+document.getElementById('activeCheck').onchange = function(e) { isActive = e.target.checked; };
+
+document.getElementById('zoomRange').oninput = function(e) {
+  zoom = parseFloat(e.target.value);
+  document.getElementById('zoomVal').textContent = zoom;
+  updateCanvasSize();
+};
+document.getElementById('speedRange').oninput = function(e) {
+  stepsPerFrame = parseInt(e.target.value);
+  document.getElementById('speedVal').textContent = stepsPerFrame;
+};
+document.getElementById('brushRange').oninput = function(e) {
+  brushSize = parseInt(e.target.value);
+  document.getElementById('brushVal').textContent = brushSize;
+};
+document.getElementById('threshRange').oninput = function(e) {
+  livingThreshold = parseFloat(e.target.value);
+  document.getElementById('threshVal').textContent = livingThreshold;
+};
+document.getElementById('couplingRange').oninput = function(e) {
+  couplingStrength = parseFloat(e.target.value);
+  document.getElementById('couplingVal').textContent = couplingStrength.toFixed(2);
+};
+document.getElementById('resizeBtn').onclick = function() {
+  GW = parseInt(document.getElementById('gridW').value) || 128;
+  GH = parseInt(document.getElementById('gridH').value) || 128;
+  GW = Math.max(32, Math.min(512, GW));
+  GH = Math.max(32, Math.min(512, GH));
+  initCanvas();
+};
+document.getElementById('removeBtn').onclick = function() {
+  if (layers.length === 0) return;
+  var L = layers[selectedIdx];
+  if (L) {
+    L.state.dispose(); L.perceptionKernel.dispose();
+    L.dense1k.dispose(); L.dense1b.dispose();
+    L.dense2k.dispose(); L.dense2b.dispose();
+  }
+  layers.splice(selectedIdx, 1);
+  selectedIdx = Math.min(selectedIdx, layers.length - 1);
+  refreshModelList();
+  statusEl.textContent = layers.length + ' layer(s)';
+};
+
+function getGridPos(e) {
+  var rect = canvas.getBoundingClientRect();
+  return [
+    Math.floor((e.clientX - rect.left) / rect.width * GW),
+    Math.floor((e.clientY - rect.top) / rect.height * GH)
+  ];
+}
+
+canvas.onmousedown = function(e) {
+  if (layers.length === 0) return;
+  e.preventDefault();
+  var pos = getGridPos(e);
+  if (currentTool === 'seed' || e.shiftKey) {
+    plantSeed(pos[0], pos[1], selectedIdx);
+  } else {
+    isDragging = true;
+    damageLayer(selectedIdx, pos[0], pos[1], brushSize);
+  }
+};
+canvas.onmousemove = function(e) {
+  if (!isDragging || layers.length === 0) return;
+  var pos = getGridPos(e);
+  if (currentTool === 'seed' || e.shiftKey) {
+    plantSeed(pos[0], pos[1], selectedIdx);
+  } else {
+    damageLayer(selectedIdx, pos[0], pos[1], brushSize);
+  }
+};
+canvas.onmouseup = function() { isDragging = false; };
+canvas.onmouseleave = function() { isDragging = false; };
+
+canvas.ontouchstart = function(e) {
+  if (layers.length === 0) return; e.preventDefault();
+  var pos = getGridPos(e.touches[0]); isDragging = true;
+  if (currentTool === 'seed') plantSeed(pos[0], pos[1], selectedIdx);
+  else damageLayer(selectedIdx, pos[0], pos[1], brushSize);
+};
+canvas.ontouchmove = function(e) {
+  if (!isDragging || layers.length === 0) return; e.preventDefault();
+  var pos = getGridPos(e.touches[0]);
+  if (currentTool === 'seed') plantSeed(pos[0], pos[1], selectedIdx);
+  else damageLayer(selectedIdx, pos[0], pos[1], brushSize);
+};
+canvas.ontouchend = function() { isDragging = false; };
+
+initTF();
+</script>
+</body>
+</html>

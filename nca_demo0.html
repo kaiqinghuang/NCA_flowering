@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Growing NCA Interactive Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f5f5f5; color: #222; min-height: 100vh; }
+
+  .header { background: #fff; padding: 16px 24px; border-bottom: 1px solid #ddd;
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-size: 18px; color: #111; flex-shrink: 0; }
+  #status { font-size: 13px; color: #555; }
+
+  .main { display: flex; gap: 16px; padding: 16px; max-width: 1200px; margin: 0 auto; }
+
+  .sidebar { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: #fff; border-radius: 8px; padding: 14px; border: 1px solid #ddd; }
+  .panel h3 { font-size: 13px; color: #333; margin-bottom: 10px; text-transform: uppercase;
+              letter-spacing: 1px; font-weight: 700; }
+
+  .model-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px;
+                overflow-y: auto; margin-bottom: 10px; }
+  .model-item { padding: 8px 10px; background: #f5f5f5; border-radius: 6px; cursor: pointer;
+                border: 2px solid transparent; transition: all 0.2s; font-size: 12px; }
+  .model-item:hover { border-color: #999; }
+  .model-item.active { border-color: #222; background: #e8e8e8; }
+  .model-item .name { font-weight: 600; color: #111; }
+  .model-item .meta { color: #888; font-size: 11px; margin-top: 2px; }
+
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { padding: 6px 12px; border: 1px solid #ccc; border-radius: 6px; background: #fff;
+         color: #333; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+  .btn:hover { background: #eee; border-color: #999; }
+
+  .slider-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
+  .slider-row label { width: 55px; color: #555; }
+  .slider-row input[type=range] { flex: 1; accent-color: #333; }
+  .slider-row .val { width: 30px; text-align: right; color: #111; font-weight: 600; }
+
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
+  .checkbox-row input { accent-color: #333; }
+
+  .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
+  canvas { border: 1px solid #ccc; border-radius: 8px; cursor: crosshair;
+           image-rendering: pixelated; background: #fff; max-width: 100%; }
+  #info { font-size: 11px; color: #999; margin-top: 8px; }
+  .help { font-size: 11px; color: #999; margin-top: 8px; line-height: 1.6; }
+
+  .drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 20px; text-align: center;
+               color: #999; font-size: 12px; cursor: pointer; transition: all 0.2s; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #666; color: #666; }
+  .drop-zone input { display: none; }
+
+  .threshold-note { font-size: 11px; color: #999; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Growing NCA Demo</h1>
+  <div id="status">Waiting for model...</div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Models</h3>
+      <div class="drop-zone" id="dropZone">
+        <input type="file" id="fileInput" accept=".json" multiple>
+        Drop .json model files here<br>or click to browse
+      </div>
+      <div class="model-list" id="modelList"></div>
+      <div class="btn-row">
+        <button class="btn" id="removeBtn">Remove</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="btn-row">
+        <button class="btn" id="resetBtn">Reset Seed</button>
+        <button class="btn" id="damageBtn">Damage</button>
+        <button class="btn" id="clearBtn">Clear</button>
+      </div>
+      <div class="slider-row">
+        <label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="10" value="4" step="0.5">
+        <span class="val" id="zoomVal">4</span>
+      </div>
+      <div class="slider-row">
+        <label>Speed</label>
+        <input type="range" id="speedRange" min="1" max="16" value="1">
+        <span class="val" id="speedVal">1</span>
+      </div>
+      <div class="slider-row">
+        <label>Brush</label>
+        <input type="range" id="brushRange" min="2" max="30" value="8">
+        <span class="val" id="brushVal">8</span>
+      </div>
+      <div class="slider-row">
+        <label>Threshold</label>
+        <input type="range" id="threshRange" min="0.01" max="1.0" value="0.1" step="0.01">
+        <span class="val" id="threshVal">0.1</span>
+      </div>
+      <div class="threshold-note">Living mask alpha threshold (default 0.1, use 0.85 for flower model)</div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="activeCheck" checked>
+        <label>Running</label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Current Model Info</h3>
+      <div id="modelInfo" style="font-size: 12px; color: #888; line-height: 1.8;">
+        No model loaded
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas-area">
+    <canvas id="canvas"></canvas>
+    <div id="info"></div>
+    <div class="help">
+      Left-click drag = Damage (erase) &nbsp;|&nbsp; Shift+click = Plant seed<br>
+      Load a .json model file exported from Colab to start
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script>
+"use strict";
+
+let models = [];
+let activeModelIdx = -1;
+let state = null;
+let perceptionKernel = null;
+let dense1_kernel = null, dense1_bias = null, dense2_kernel = null, dense2_bias = null;
+let GH = 0, GW = 0, CH = 0, HIDDEN = 0;
+let livingThreshold = 0.1;
+
+let zoom = 4, stepsPerFrame = 1, brushSize = 8;
+let isActive = true, isDragging = false, stepCount = 0;
+let animId = null;
+
+const statusEl = document.getElementById('status');
+const infoEl = document.getElementById('info');
+const modelInfoEl = document.getElementById('modelInfo');
+const modelListEl = document.getElementById('modelList');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+async function initTF() {
+  try {
+    await tf.setBackend('webgl');
+    await tf.ready();
+    statusEl.textContent = 'Backend: ' + tf.getBackend() + ' (GPU)';
+  } catch(e) {
+    await tf.setBackend('cpu');
+    await tf.ready();
+    statusEl.textContent = 'Backend: CPU';
+  }
+}
+
+function decodeWeight(wInfo) {
+  const bytes = Uint8Array.from(atob(wInfo.data), c => c.charCodeAt(0));
+  const floats = new Float32Array(bytes.buffer);
+  return tf.tensor(floats, wInfo.shape);
+}
+
+function buildPerceptionKernel(ch) {
+  const identify = [0,0,0, 0,1,0, 0,0,0];
+  const dx = [-1/8,0,1/8, -2/8,0,2/8, -1/8,0,1/8];
+  const dy = [-1/8,-2/8,-1/8, 0,0,0, 1/8,2/8,1/8];
+  const data = new Float32Array(3 * 3 * ch * 3);
+  for (let c = 0; c < ch; c++) {
+    for (let p = 0; p < 9; p++) {
+      data[p * ch * 3 + c * 3 + 0] = identify[p];
+      data[p * ch * 3 + c * 3 + 1] = dx[p];
+      data[p * ch * 3 + c * 3 + 2] = dy[p];
+    }
+  }
+  return tf.tensor4d(data, [3, 3, ch, 3]);
+}
+
+function activateModel(idx) {
+  if (idx < 0 || idx >= models.length) return;
+  if (animId) { cancelAnimationFrame(animId); animId = null; }
+  if (state) state.dispose();
+  if (perceptionKernel) perceptionKernel.dispose();
+  if (dense1_kernel) dense1_kernel.dispose();
+  if (dense1_bias) dense1_bias.dispose();
+  if (dense2_kernel) dense2_kernel.dispose();
+  if (dense2_bias) dense2_bias.dispose();
+
+  const m = models[idx];
+  const d = m.data;
+  activeModelIdx = idx;
+
+  GH = d.grid_h;
+  GW = d.grid_w;
+  CH = d.channel_n;
+
+  dense1_kernel = decodeWeight(d.weights[0]);
+  dense1_bias = decodeWeight(d.weights[1]);
+  dense2_kernel = decodeWeight(d.weights[2]);
+  dense2_bias = decodeWeight(d.weights[3]);
+  HIDDEN = dense1_bias.shape[0];
+
+  perceptionKernel = buildPerceptionKernel(CH);
+  resetSeed();
+
+  canvas.width = GW;
+  canvas.height = GH;
+  updateCanvasSize();
+
+  modelInfoEl.innerHTML =
+    'Name: <b>' + m.name + '</b><br>' +
+    'Grid: ' + GW + ' x ' + GH + '<br>' +
+    'Channels: ' + CH + '<br>' +
+    'Hidden: ' + HIDDEN + '<br>' +
+    'Perception: ' + (CH * 3);
+
+  document.querySelectorAll('.model-item').forEach(function(el, i) {
+    el.classList.toggle('active', i === idx);
+  });
+
+  stepCount = 0;
+  statusEl.textContent = 'Running: ' + m.name + ' | Backend: ' + tf.getBackend();
+  render();
+}
+
+function resetSeed() {
+  if (state) state.dispose();
+  const buf = tf.buffer([1, GH, GW, CH]);
+  const cy = Math.floor(GH / 2);
+  const cx = Math.floor(GW / 2);
+  for (let c = 3; c < CH; c++) {
+    buf.set(1.0, 0, cy, cx, c);
+  }
+  state = tf.variable(buf.toTensor());
+}
+
+function getLivingMask(x) {
+  const alpha = x.slice([0,0,0,3], [-1,-1,-1,1]);
+  const pooled = tf.maxPool(alpha, 3, 1, 'same');
+  return pooled.greater(livingThreshold);
+}
+
+function step() {
+  tf.tidy(function() {
+    var x = state;
+    var preLifeMask = getLivingMask(x);
+    var perceived = tf.depthwiseConv2d(x, perceptionKernel, 1, 'same');
+    var h1 = tf.relu(tf.add(tf.conv2d(perceived, dense1_kernel, 1, 'same'), dense1_bias));
+    var dx = tf.add(tf.conv2d(h1, dense2_kernel, 1, 'same'), dense2_bias);
+    var updateMask = tf.randomUniform([1, GH, GW, 1]).lessEqual(0.5);
+    var updated = tf.add(x, tf.mul(dx, tf.cast(updateMask, 'float32')));
+    var postLifeMask = getLivingMask(updated);
+    var lifeMask = tf.logicalAnd(preLifeMask, postLifeMask);
+    state.assign(tf.mul(updated, tf.cast(lifeMask, 'float32')));
+  });
+}
+
+function damage(cx, cy, radius) {
+  tf.tidy(function() {
+    var xs = tf.range(0, GW).expandDims(0);
+    var ys = tf.range(0, GH).expandDims(1);
+    var distSq = tf.add(
+      tf.square(tf.sub(xs, cx).div(radius)),
+      tf.square(tf.sub(ys, cy).div(radius))
+    );
+    var mask = distSq.greater(1.0).expandDims(0).expandDims(-1);
+    state.assign(tf.mul(state, tf.cast(mask, 'float32')));
+  });
+}
+
+function plantSeed(px, py) {
+  tf.tidy(function() {
+    var buf = tf.buffer([1, GH, GW, CH]);
+    if (py >= 0 && py < GH && px >= 0 && px < GW) {
+      for (var c = 3; c < CH; c++) {
+        buf.set(1.0, 0, py, px, c);
+      }
+    }
+    state.assign(tf.add(state, buf.toTensor()));
+  });
+}
+
+function render() {
+  if (isActive && state) {
+    for (var i = 0; i < stepsPerFrame; i++) {
+      step();
+      stepCount++;
+    }
+  }
+  if (state) {
+    tf.tidy(function() {
+      var rgba = state.slice([0,0,0,0], [-1,-1,-1,4]);
+      var alpha = state.slice([0,0,0,3], [-1,-1,-1,1]);
+      var rgb = tf.add(tf.sub(1.0, alpha), rgba.slice([0,0,0,0], [-1,-1,-1,3]));
+      var vis = tf.clipByValue(rgb, 0, 1).mul(255);
+      var data = vis.dataSync();
+      var imgData = new ImageData(GW, GH);
+      for (var i = 0; i < GW * GH; i++) {
+        imgData.data[i*4+0] = data[i*3+0];
+        imgData.data[i*4+1] = data[i*3+1];
+        imgData.data[i*4+2] = data[i*3+2];
+        imgData.data[i*4+3] = 255;
+      }
+      ctx.putImageData(imgData, 0, 0);
+    });
+  }
+  infoEl.textContent = state
+    ? 'Grid: '+GW+'x'+GH+' | CH: '+CH+' | Hidden: '+HIDDEN+' | Steps: '+stepCount+' | Tensors: '+tf.memory().numTensors
+    : 'Load a model to start';
+  animId = requestAnimationFrame(render);
+}
+
+function addModel(name, data) {
+  models.push({ name: name, data: data });
+  refreshModelList();
+  if (models.length === 1) activateModel(0);
+}
+
+function refreshModelList() {
+  modelListEl.innerHTML = '';
+  models.forEach(function(m, i) {
+    var div = document.createElement('div');
+    div.className = 'model-item' + (i === activeModelIdx ? ' active' : '');
+    var ch = m.data.channel_n;
+    var hidden = m.data.weights[1].shape[0];
+    div.innerHTML = '<div class="name">' + m.name + '</div>' +
+      '<div class="meta">' + m.data.grid_w + 'x' + m.data.grid_h + ' | CH=' + ch + ' | Hidden=' + hidden + '</div>';
+    div.onclick = function() { activateModel(i); };
+    modelListEl.appendChild(div);
+  });
+}
+
+function handleFiles(files) {
+  Array.from(files).forEach(function(file) {
+    if (!file.name.endsWith('.json')) return;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = JSON.parse(e.target.result);
+        if (!data.weights || !data.grid_h || !data.channel_n) {
+          alert('Invalid model file: ' + file.name);
+          return;
+        }
+        addModel(file.name.replace('.json', ''), data);
+      } catch(err) {
+        alert('Failed to parse: ' + file.name + '\n' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  });
+}
+
+var dropZone = document.getElementById('dropZone');
+var fileInput = document.getElementById('fileInput');
+dropZone.onclick = function() { fileInput.click(); };
+fileInput.onchange = function(e) { handleFiles(e.target.files); };
+dropZone.ondragover = function(e) { e.preventDefault(); dropZone.classList.add('drag-over'); };
+dropZone.ondragleave = function() { dropZone.classList.remove('drag-over'); };
+dropZone.ondrop = function(e) {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+};
+
+document.getElementById('resetBtn').onclick = function() { if (state) { resetSeed(); stepCount = 0; } };
+document.getElementById('damageBtn').onclick = function() { if (state) damage(GW/2, GH/2, Math.min(GW,GH)*0.25); };
+document.getElementById('clearBtn').onclick = function() { if (state) { tf.tidy(function() { state.assign(tf.zerosLike(state)); }); } };
+document.getElementById('activeCheck').onchange = function(e) { isActive = e.target.checked; };
+
+document.getElementById('zoomRange').oninput = function(e) {
+  zoom = parseFloat(e.target.value);
+  document.getElementById('zoomVal').textContent = zoom;
+  updateCanvasSize();
+};
+document.getElementById('speedRange').oninput = function(e) {
+  stepsPerFrame = parseInt(e.target.value);
+  document.getElementById('speedVal').textContent = stepsPerFrame;
+};
+document.getElementById('brushRange').oninput = function(e) {
+  brushSize = parseInt(e.target.value);
+  document.getElementById('brushVal').textContent = brushSize;
+};
+document.getElementById('threshRange').oninput = function(e) {
+  livingThreshold = parseFloat(e.target.value);
+  document.getElementById('threshVal').textContent = livingThreshold;
+};
+document.getElementById('removeBtn').onclick = function() {
+  if (activeModelIdx < 0) return;
+  models.splice(activeModelIdx, 1);
+  if (models.length === 0) {
+    activeModelIdx = -1;
+    if (animId) { cancelAnimationFrame(animId); animId = null; }
+    if (state) { state.dispose(); state = null; }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    modelInfoEl.textContent = 'No model loaded';
+    statusEl.textContent = 'Model removed';
+  } else {
+    activateModel(Math.min(activeModelIdx, models.length - 1));
+  }
+  refreshModelList();
+};
+
+function updateCanvasSize() {
+  if (GW && GH) {
+    canvas.style.width = Math.round(GW * zoom) + 'px';
+    canvas.style.height = Math.round(GH * zoom) + 'px';
+  }
+}
+
+function getGridPos(e) {
+  var rect = canvas.getBoundingClientRect();
+  return [
+    Math.floor((e.clientX - rect.left) / rect.width * GW),
+    Math.floor((e.clientY - rect.top) / rect.height * GH)
+  ];
+}
+
+canvas.onmousedown = function(e) {
+  if (!state) return;
+  e.preventDefault();
+  var pos = getGridPos(e);
+  if (e.shiftKey) { plantSeed(pos[0], pos[1]); }
+  else { isDragging = true; damage(pos[0], pos[1], brushSize); }
+};
+canvas.onmousemove = function(e) {
+  if (isDragging && state) { var pos = getGridPos(e); damage(pos[0], pos[1], brushSize); }
+};
+canvas.onmouseup = function() { isDragging = false; };
+canvas.onmouseleave = function() { isDragging = false; };
+
+canvas.ontouchstart = function(e) {
+  if (!state) return;
+  e.preventDefault();
+  var pos = getGridPos(e.touches[0]);
+  isDragging = true;
+  damage(pos[0], pos[1], brushSize);
+};
+canvas.ontouchmove = function(e) {
+  if (isDragging && state) {
+    e.preventDefault();
+    var pos = getGridPos(e.touches[0]);
+    damage(pos[0], pos[1], brushSize);
+  }
+};
+canvas.ontouchend = function() { isDragging = false; };
+
+initTF();
+</script>
+</body>
+</html>
