@@ -378,6 +378,8 @@ var infoEveryNFrames = 10;
 // Soft frame limiter for heavy workloads (0 disables limiting).
 var targetRenderFps = 45;
 var lastRenderTs = 0;
+var fpsSmoothed = targetRenderFps > 0 ? targetRenderFps : 60;
+var fpsInstant = 0;
 var cachedNoise01 = new Float32Array(W * H);
 var cachedQuartile = new Uint8Array(W * H); // dominant slot 0..(4+brush_n-1)
 var cachedMixR = new Float32Array(W * H);
@@ -1939,6 +1941,10 @@ function render(ts) {
     if (lastRenderTs > 0) frameDtMs = ts - lastRenderTs;
     lastRenderTs = ts;
   }
+  if (frameDtMs > 0) {
+    fpsInstant = 1000 / frameDtMs;
+    fpsSmoothed += (fpsInstant - fpsSmoothed) * 0.12;
+  }
 
   renderFrame++;
   var needRebuildMask = false;
@@ -2007,7 +2013,8 @@ function render(ts) {
     for (var bi = 0; bi < brushModels.length; bi++) {
       names.push(brushModels[bi].name);
     }
-    infoEl.textContent = 'Steps: ' + stepCount + ' | Tensors: ' + tf.memory().numTensors +
+    infoEl.textContent = 'FPS: ' + fpsSmoothed.toFixed(1) + ' (now ' + fpsInstant.toFixed(1) + ')' +
+      ' | Steps: ' + stepCount + ' | Tensors: ' + tf.memory().numTensors +
       ' | A-D + Brush: ' + names.join(', ');
   }
   animId = requestAnimationFrame(render);
