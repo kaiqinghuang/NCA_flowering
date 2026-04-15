@@ -1,0 +1,2035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NCA — 4× layered Perlin (GPU-resident)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #111; color: #eee; min-height: 100vh; }
+
+  .header { background: #1a1a1a; padding: 14px 24px; border-bottom: 1px solid #333;
+            display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .header h1 { font-size: 18px; color: #fff; }
+  #status { font-size: 13px; color: #999; }
+
+  .main { display: flex; flex-direction: row; gap: 16px; padding: 16px; max-width: 2400px; margin: 0 auto;
+          align-items: flex-start; }
+
+  .sidebar-left { width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+  .sidebar-right { width: 300px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+
+  .brush-item { padding: 6px 8px; background: #222; border-radius: 5px; margin-bottom: 4px;
+                font-size: 11px; display: flex; align-items: center; gap: 8px; cursor: pointer;
+                border: 1px solid transparent; }
+  .brush-item:hover { background: #2a2a2a; }
+  .brush-item.selected { border-color: #888; background: #2d2d2d; }
+  .brush-color-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .panel { background: #1a1a1a; border-radius: 8px; padding: 14px; border: 1px solid #333; }
+  .panel h3 { font-size: 12px; color: #aaa; margin-bottom: 10px; text-transform: uppercase;
+              letter-spacing: 1px; font-weight: 700; }
+
+  .drop-zone { border: 2px dashed #555; border-radius: 8px; padding: 12px; text-align: center;
+               color: #888; font-size: 12px; cursor: pointer; transition: all 0.2s; margin-bottom: 6px; }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: #aaa; color: #aaa; }
+  .drop-zone input { display: none; }
+
+  .model-slot { padding: 8px 10px; background: #222; border-radius: 6px; margin-bottom: 6px;
+                font-size: 12px; display: flex; align-items: center; gap: 8px; }
+  .model-slot .name { color: #fff; flex: 1; }
+  .tag { padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 700; }
+  .tag-q0 { background: #4a6ad4; color: #fff; }
+  .tag-q1 { background: #3dad6a; color: #fff; }
+  .tag-q2 { background: #c9a227; color: #000; }
+  .tag-q3 { background: #c44a9c; color: #fff; }
+
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .btn { padding: 5px 10px; border: 1px solid #555; border-radius: 5px; background: #222;
+         color: #ccc; cursor: pointer; font-size: 11px; transition: all 0.15s; }
+  .btn:hover { background: #333; border-color: #888; }
+
+  .slider-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 11px; }
+  .slider-row label { width: 80px; color: #888; }
+  .slider-row input[type=range] { flex: 1; accent-color: #fff; }
+  .slider-row .val { width: 36px; text-align: right; color: #fff; font-weight: 600; font-size: 11px; }
+
+  .checkbox-row { display: flex; align-items: center; gap: 6px; margin: 5px 0; font-size: 12px; color: #ccc; }
+  .checkbox-row input { accent-color: #fff; }
+
+  .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; min-width: 0; }
+  .canvas-sim-column { display: flex; flex-direction: column; align-items: center; width: 100%; }
+  canvas { border: 1px solid #333; border-radius: 8px;
+           image-rendering: pixelated; background: #000; display: block; }
+  .sim-meta { width: 100%; max-width: 52rem; text-align: center; }
+  .preview-block { margin-top: 14px; display: flex; flex-direction: column; align-items: center; width: 100%; }
+  .preview-label { font-size: 11px; color: #888; margin-bottom: 6px; line-height: 1.45; text-align: center; }
+  #info { font-size: 11px; color: #666; margin-top: 6px; }
+  .help { font-size: 11px; color: #666; margin-top: 6px; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>NCA — 4 Perlin fields, GPU-resident pipeline</h1>
+  <div id="status">Load models to start</div>
+</div>
+
+<div class="main">
+  <div class="sidebar-left">
+    <div class="panel">
+      <h3>Models (priority stack)</h3>
+      <p style="font-size:10px;color:#888;line-height:1.4;margin-bottom:10px;">
+        Four independent 3D Perlin fBm fields (different phase + scale).
+        <span class="tag tag-q3">D</span> claims first, then <span class="tag tag-q2">C</span>,
+        <span class="tag tag-q1">B</span>; leftover → <span class="tag tag-q0">A</span>.
+      </p>
+      <div class="drop-zone" id="dropModel0">
+        <input type="file" id="fileModel0" accept=".npy"> Drop model A .npy
+      </div>
+      <div class="model-slot"><span class="tag tag-q0">A</span><span class="name" id="modelName0">None</span></div>
+      <div class="drop-zone" id="dropModel1">
+        <input type="file" id="fileModel1" accept=".npy"> Drop model B .npy
+      </div>
+      <div class="model-slot"><span class="tag tag-q1">B</span><span class="name" id="modelName1">None</span></div>
+      <div class="drop-zone" id="dropModel2">
+        <input type="file" id="fileModel2" accept=".npy"> Drop model C .npy
+      </div>
+      <div class="model-slot"><span class="tag tag-q2">C</span><span class="name" id="modelName2">None</span></div>
+      <div class="drop-zone" id="dropModel3">
+        <input type="file" id="fileModel3" accept=".npy"> Drop model D .npy
+      </div>
+      <div class="model-slot"><span class="tag tag-q3">D</span><span class="name" id="modelName3">None</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="checkbox-row">
+        <input type="checkbox" id="activeCheck" checked>
+        <label for="activeCheck">Active</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="disturbCheck">
+        <label for="disturbCheck">Disturbance</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="clearOnChangeCheck" checked>
+        <label for="clearOnChangeCheck">Clear on change</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="showMaskCheck">
+        <label for="showMaskCheck">Tint canvas by blend weights</label>
+      </div>
+      <div style="margin: 8px 0 4px; font-size:11px; color:#888;">Alignment</div>
+      <div class="radio-row" style="display:flex; gap:10px; margin:4px 0; font-size:12px;">
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="alignment" value="0"> Cartesian</label>
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="alignment" value="1"> Polar</label>
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;"><input type="radio" name="alignment" value="2" checked> Bipolar</label>
+      </div>
+      <div class="slider-row">
+        <label>Rotation</label>
+        <input type="range" id="rotationRange" min="0" max="360" value="0" step="1">
+        <span class="val" id="rotationVal">0</span>
+      </div>
+      <div class="slider-row">
+        <label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="32" value="2" step="0.5">
+        <span class="val" id="zoomVal">2</span>
+      </div>
+      <div class="slider-row">
+        <label>Speed</label>
+        <input type="range" id="speedRange" min="1" max="16" value="1">
+        <span class="val" id="speedVal">1</span>
+      </div>
+      <div style="margin: 10px 0 4px; font-size:11px; color:#888;">Perlin mask (fBm)</div>
+      <div class="slider-row">
+        <label>Noise scale</label>
+        <input type="range" id="noiseScaleRange" min="1" max="7" value="3.35" step="0.05">
+        <span class="val" id="noiseScaleVal">3.35</span>
+      </div>
+      <div class="slider-row">
+        <label>Octaves</label>
+        <input type="range" id="noiseOctavesRange" min="100" max="250" value="120" step="1">
+        <span class="val" id="noiseOctavesVal">1.20</span>
+      </div>
+      <div class="slider-row">
+        <label>Mask cutoff</label>
+        <input type="range" id="maskCutoffRange" min="10" max="90" value="54" step="1">
+        <span class="val" id="maskCutoffVal">0.54</span>
+      </div>
+      <div class="slider-row">
+        <label>Mask edge</label>
+        <input type="range" id="maskEdgeRange" min="2" max="40" value="30" step="1">
+        <span class="val" id="maskEdgeVal">30</span>
+      </div>
+      <div class="slider-row">
+        <label>Layer Δfreq</label>
+        <input type="range" id="layerFreqRange" min="0" max="100" value="55" step="1">
+        <span class="val" id="layerFreqVal">0.55</span>
+      </div>
+      <div class="slider-row">
+        <label>Time speed</label>
+        <input type="range" id="noiseTimeSpeedRange" min="5" max="200" value="8" step="1">
+        <span class="val" id="noiseTimeSpeedVal">0.002</span>
+      </div>
+      <div class="slider-row">
+        <label>Time scale (Z)</label>
+        <input type="range" id="noiseZScaleRange" min="25" max="400" value="100" step="5">
+        <span class="val" id="noiseZScaleVal">1</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="noiseAnimateCheck">
+        <label for="noiseAnimateCheck">Animate (evolve in time)</label>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="reseedNoiseBtn" type="button">New noise seed</button>
+        <button class="btn" id="clearBtn">Clear Canvas</button>
+        <button class="btn" id="upscale2xBtn" type="button">Upscale ×2</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas-area">
+    <div class="canvas-sim-column">
+      <canvas id="canvas"></canvas>
+      <div id="info" class="sim-meta"></div>
+      <div class="help sim-meta">
+        Four Perlin fields drive priority blending between models A–D.
+        Everything (perlin, mask tensor, display) now stays resident in GPU memory.
+      </div>
+      <div class="preview-block">
+        <div class="preview-label">
+          <strong>Blend map</strong> — RGB mix of A/B/C/D plus brush models, same grid as main canvas.
+        </div>
+        <canvas id="noisePreview"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="sidebar-right">
+    <div class="panel">
+      <h3>Brush Models (E/F/G...)</h3>
+      <p style="font-size:10px;color:#888;line-height:1.4;margin-bottom:10px;">
+        Load multiple brush models. Select one below, then paint on the canvas to draw that model's mask.
+        Brush models stack above <span class="tag tag-q3">D</span> with soft normalized weights.
+      </p>
+      <div class="drop-zone" id="dropBrushModel">
+        <input type="file" id="fileBrushModel" accept=".npy" multiple> Add brush model .npy
+      </div>
+      <div id="brushModelList"></div>
+      <div style="margin:10px 0 6px;font-size:11px;color:#aaa;font-weight:700;">Paint mask</div>
+      <p style="font-size:10px;color:#888;line-height:1.4;margin-bottom:8px;">
+        Hold left button on the main canvas and drag. <strong>Shift</strong> + drag erases selected model mask.
+      </p>
+      <div class="slider-row">
+        <label>Size</label>
+        <input type="range" id="brushRange" min="1" max="16" value="2" step="1">
+        <span class="val" id="brushVal">2</span>
+      </div>
+      <div class="slider-row">
+        <label>Splatter #</label>
+        <input type="range" id="spraySplatterAmountRange" min="2" max="40" value="5" step="1">
+        <span class="val" id="spraySplatterAmountVal">5</span>
+      </div>
+      <div class="slider-row">
+        <label>Splatter R</label>
+        <input type="range" id="spraySplatterRadiusRange" min="6" max="60" value="17" step="1">
+        <span class="val" id="spraySplatterRadiusVal">17</span>
+      </div>
+      <div class="slider-row">
+        <label>Drip threshold</label>
+        <input type="range" id="sprayDripThresholdRange" min="4" max="120" value="8" step="1">
+        <span class="val" id="sprayDripThresholdVal">0.08</span>
+      </div>
+      <div class="slider-row">
+        <label>Drip speed</label>
+        <input type="range" id="sprayDripSpeedRange" min="4" max="55" value="40" step="1">
+        <span class="val" id="sprayDripSpeedVal">0.40</span>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="drawModeCheck" checked>
+        <label for="drawModeCheck">Enable draw on canvas</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="drawDecayCheck" checked>
+        <label for="drawDecayCheck">Brush fades and softens over time</label>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="clearDrawMaskBtn" type="button">Clear selected mask</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.17.0/dist/tf-backend-webgpu.min.js"></script>
+<script>
+"use strict";
+
+// ====== WebGPU adapter-info compat shim (tfjs-webgpu 4.17 on newer browsers) ======
+(function ensureGpuAdapterInfoCompat() {
+  if (typeof GPUAdapter === 'undefined') return;
+  var proto = GPUAdapter.prototype;
+  if (!proto || typeof proto.requestAdapterInfo === 'function') return;
+  if (!Object.getOwnPropertyDescriptor(proto, 'info')) return;
+  proto.requestAdapterInfo = function() {
+    try { return Promise.resolve(this.info || {}); }
+    catch (err) { return Promise.resolve({}); }
+  };
+})();
+
+// ====== Config ======
+var CH = 12;
+var FILTER_N = 4;
+var BASE_MODELS = 4;
+var W = 384, H = 216;
+
+// Longest-side reference so blobs are not squashed on non-square canvas.
+function noiseSpaceRef() { return Math.max(1, Math.max(W, H)); }
+
+// ====== State ======
+var baseModels = [null, null, null, null];
+var brushModels = [];           // dynamic E/F/G... models with per-pixel mask state
+var nextBrushModelId = 1;
+var selectedBrushModelId = null;
+var strokeOrderMap = new Uint32Array(0);
+var strokeModelMap = new Int32Array(0);
+var strokeCounter = 0;
+var state = null;               // tf.variable [1,H,W,CH]
+var perceptionKernel = null;    // [3,3,CH,FILTER_N]
+var quartileMaskTensor = null;  // [1,H,W,4+brushN] weights, kept on GPU
+var paletteTensor = null;       // [totalModels,3] normalized palette, reused for tinting
+var basePerlinTensor = null;    // [1,H,W,4] Perlin base weights, reused when only brush changes
+var brushWeightsTensor = null;  // [1,H,W,brushN] uploaded when brush CPU state changes
+var remBrushTensor = null;      // [1,H,W,1] base remainder after brush priority stacking
+var brushWeightsCpu = null;     // Float32Array [H*W*brushN]
+var remBrushCpu = null;         // Float32Array [H*W]
+var brushStateDirty = true;     // set true when mask/life/ownership changes
+
+// Batched weights: all loaded models fused along the hidden axis so one
+// conv2d covers every model's dense1, and one einsum covers every dense2.
+var batchedDense1k = null;       // [1,1,perception_n, N*HIDDEN]
+var batchedDense1b = null;       // [N*HIDDEN]
+var batchedDense2k = null;       // [N, HIDDEN, CH]
+var batchedDense2b = null;       // [N, CH]
+var batchedHidden = 0;
+var loadedSlotIndices = [];      // e.g. [0,2,3] when slot B is empty
+var loadedSlotsIdxTensor = null; // int32 tensor of the above, for gather
+
+// tfjs-native Perlin: when true, buildMaskTensor bypasses the WebGL shader +
+// fromPixels roundtrip and computes the mask entirely in tfjs ops. Keeps the
+// tensor on the same GPU context as NCA, eliminating cross-context sync.
+// Set to false to fall back to the shader path for comparison.
+var usePerlinTfjs = false;
+var perlinPixelXY = null;        // [H, W, 2] cached (col, row) floats, rebuilt on resize
+
+var zoom = 2, stepsPerFrame = 1;
+var noiseScale = 3.35, noiseOctaves = 1.2;
+var maskThreshold = 0.5, maskEdgeSharpness = 30, layerFreqSpread = 0.55;
+var noiseAnimate = false, noiseTime = 0.0;
+// noiseTimeSpeed is now calibrated as "noise units per 1/60s frame-equivalent"
+// so the visual speed is stable regardless of targetFps (see render()).
+var noiseTimeSpeed = 0.002, noiseZScale = 1.0;
+var noiseSeedOffset = [0, 0, 0];
+
+// Per-layer phase so fields are decorrelated.
+var LAYER_PHASE = [
+  [0, 0, 0],
+  [41.17, 109.3, 27.8],
+  [203.6, 17.2, 91.4],
+  [67.9, 251.1, 156.7]
+];
+
+var isActive = true, disturbance = false, clearOnChange = true, showMask = false;
+var alignment = 2;
+var rotationAngle = 0;
+var dirCos = null, dirSin = null;
+var stepCount = 0, animId = null;
+var isUpscaling = false;
+var backendName = 'unknown', backendNote = '';
+
+// ====== Brush config (mirrors reference) ======
+var DRAW_MASK_EPS = 1e-6;
+var brushRadiusPx = 2;
+var spraySplatterAmount = 5;
+var spraySplatterRadius = 17;
+var sprayWetGain = 2.2;
+var sprayDripThreshold = 0.08;
+var sprayDripSpeed = 0.40;
+var sprayDripKick = 0.45;
+var sprayDripKeep = 0.88;
+var sprayDripWobble = 0.22;
+var sprayDripMinWidth = 0.7;
+var sprayDripTail = 0.18;
+var drawOnCanvasEnabled = true;
+var isDrawingStroke = false;
+var lastDrawGx = -1, lastDrawGy = -1;
+var activeStrokeErase = false;
+var drawLifeProgressStep = 0.0009;
+var drawHoldFrames = 180;
+var drawHoldLifeOffset = drawHoldFrames * drawLifeProgressStep;
+var drawEdgeSoftenRate = 0.15;
+var drawEdgeSharpMin = 3.0;
+var drawDiffusionPassesMax = 1;
+var drawInwardErosionRatio = 0.5;
+var drawStrengthBezierP1 = 0.02;
+var drawStrengthBezierP2 = 0.90;
+var drawEdgeBezierP1 = 0.0;
+var drawEdgeBezierP2 = 1.0;
+var drawEvolveEveryNFrames = 1;
+var drawDecayEnabled = true;
+
+// Frame pacing / throttles. 768×432 × 4 models is the worst case — running a
+// 4-way conv stack on every rAF tick (60Hz) saturates integrated GPUs. We run
+// the simulation and display every other frame, matching what the original
+// file did, so rAF stays smooth and the GPU pipelines work instead of stalling
+// on a dataSync barrier each frame.
+// Hard cap on render-loop rate. rAF fires at 60Hz but we don't need that —
+// cap the loop itself and everything downstream (mask rebuild, NCA, display)
+// drops in proportion. Changing targetFps is the biggest single perf knob.
+var targetFps = 30;
+var lastRenderTs = 0;
+var simulationEveryNFrames = 2;  // at 30fps cap: NCA @ 15Hz
+var displayEveryNFrames = 1;     // at 30fps cap: display @ 30Hz
+var previewEveryNFrames = 6;     // preview toPixels @ 5Hz while animating
+var infoEveryNFrames = 15;
+var renderFrame = 0;
+var displayPending = false;
+var previewPending = false;
+
+// FPS tracking: rolling window of recent rAF timestamps for a stable readout.
+var fpsSamples = [];
+var FPS_WINDOW = 30;
+var fpsDisplay = 0;
+
+var statusEl = document.getElementById('status');
+var infoEl = document.getElementById('info');
+var canvas = document.getElementById('canvas');
+var noisePreviewCanvas = document.getElementById('noisePreview');
+
+function backendStatusPrefix() {
+  var label = 'Backend: ' + backendName;
+  if (backendNote) label += ' | ' + backendNote;
+  return label;
+}
+
+// ====== Palette for mask tinting (shared for showMask overlay + preview) ======
+// Values match the sidebar tag colors. Rebuilt whenever brush models change.
+var BASE_PALETTE = [
+  [ 74/255, 106/255, 212/255],
+  [ 61/255, 173/255, 106/255],
+  [201/255, 162/255,  39/255],
+  [196/255,  74/255, 156/255]
+];
+function brushColorByIndex(idx) {
+  var palette = [
+    [210, 95, 55], [96, 188, 222], [223, 168, 66],
+    [173, 112, 223], [117, 205, 122], [230, 120, 160]
+  ];
+  return palette[idx % palette.length];
+}
+function buildPaletteTensor() {
+  if (paletteTensor) paletteTensor.dispose();
+  var rows = BASE_PALETTE.slice();
+  for (var i = 0; i < brushModels.length; i++) {
+    var c = brushModels[i].color;
+    rows.push([c[0] / 255, c[1] / 255, c[2] / 255]);
+  }
+  paletteTensor = tf.tensor2d(rows, [rows.length, 3]);
+}
+
+function totalModelCount() { return BASE_MODELS + brushModels.length; }
+
+function sigmoidClaim(v01, thr, sharp) {
+  return 1.0 / (1.0 + Math.exp(-(v01 - thr) * sharp));
+}
+function cubicBezier01(t, p1, p2) {
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  var u = 1 - t;
+  return (3 * u * u * t * p1) + (3 * u * t * t * p2) + (t * t * t);
+}
+function getSelectedBrushModel() {
+  if (selectedBrushModelId == null) return null;
+  for (var i = 0; i < brushModels.length; i++) {
+    if (brushModels[i].id === selectedBrushModelId) return brushModels[i];
+  }
+  return null;
+}
+function rebuildBrushModelListUI() {
+  var list = document.getElementById('brushModelList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (brushModels.length === 0) {
+    var empty = document.createElement('div');
+    empty.style.cssText = 'font-size:11px;color:#777;margin-bottom:6px;';
+    empty.textContent = 'No brush model loaded.';
+    list.appendChild(empty);
+    return;
+  }
+  brushModels.forEach(function(bm) {
+    var row = document.createElement('div');
+    row.className = 'brush-item' + (bm.id === selectedBrushModelId ? ' selected' : '');
+    row.onclick = function() { selectedBrushModelId = bm.id; rebuildBrushModelListUI(); };
+    var dot = document.createElement('span');
+    dot.className = 'brush-color-dot';
+    dot.style.background = 'rgb(' + bm.color[0] + ',' + bm.color[1] + ',' + bm.color[2] + ')';
+    var name = document.createElement('span');
+    name.style.flex = '1';
+    name.textContent = bm.name;
+    row.appendChild(dot); row.appendChild(name);
+    list.appendChild(row);
+  });
+}
+
+function allocBrushMaskArrays(bm) {
+  bm.mask = new Float32Array(W * H);
+  bm.maskNext = new Float32Array(W * H);
+  bm.accum = new Float32Array(W * H);
+  bm.drip = new Float32Array(W * H);
+  bm.dripNext = new Float32Array(W * H);
+  bm.dripWidth = new Float32Array(W * H);
+  bm.dripWidthNext = new Float32Array(W * H);
+  bm.life = new Float32Array(W * H);
+  bm.lifeNext = new Float32Array(W * H);
+  bm.life.fill(1);
+  bm.lifeNext.fill(1);
+  bm.active = false;
+}
+function ensureStrokeMaps() {
+  if (strokeOrderMap.length !== W * H) {
+    strokeOrderMap = new Uint32Array(W * H);
+    strokeModelMap = new Int32Array(W * H);
+    strokeModelMap.fill(-1);
+  }
+}
+function ensureBrushCpuBuffers() {
+  var n = brushModels.length;
+  var needLen = W * H * Math.max(1, n);
+  if (!brushWeightsCpu || brushWeightsCpu.length !== needLen) {
+    brushWeightsCpu = new Float32Array(needLen);
+  }
+  if (!remBrushCpu || remBrushCpu.length !== W * H) {
+    remBrushCpu = new Float32Array(W * H);
+  }
+}
+
+// ====== WebGL2 Perlin shader → RGBA8 canvas → tf.browser.fromPixels ======
+// No FBO/readPixels. The offscreen canvas's drawing buffer is uploaded directly
+// as a GPU texture by tfjs — no CPU roundtrip.
+var perlinGpu = {
+  ready: false,
+  canvas: null,
+  gl: null,
+  program: null,
+  vao: null,
+  uniform: {}
+};
+
+function createShader(gl, type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    var msg = gl.getShaderInfoLog(s) || 'shader compile failed';
+    gl.deleteShader(s);
+    throw new Error(msg);
+  }
+  return s;
+}
+
+function createProgram(gl, vsSrc, fsSrc) {
+  var vs = createShader(gl, gl.VERTEX_SHADER, vsSrc);
+  var fs = createShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+  var p = gl.createProgram();
+  gl.attachShader(p, vs);
+  gl.attachShader(p, fs);
+  gl.linkProgram(p);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    var msg = gl.getProgramInfoLog(p) || 'program link failed';
+    gl.deleteProgram(p);
+    throw new Error(msg);
+  }
+  return p;
+}
+
+function disposePerlinGpu() {
+  if (!perlinGpu.gl) return;
+  var gl = perlinGpu.gl;
+  if (perlinGpu.program) gl.deleteProgram(perlinGpu.program);
+  if (perlinGpu.vao) gl.deleteVertexArray(perlinGpu.vao);
+  perlinGpu.ready = false;
+  perlinGpu.canvas = null;
+  perlinGpu.gl = null;
+  perlinGpu.program = null;
+  perlinGpu.vao = null;
+  perlinGpu.uniform = {};
+}
+
+function initPerlinGpu() {
+  disposePerlinGpu();
+  var c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  // preserveDrawingBuffer so tf.browser.fromPixels can sample after drawArrays.
+  var gl = c.getContext('webgl2', {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: true,
+    premultipliedAlpha: false
+  });
+  if (!gl) return false;
+
+  var vsSrc = [
+    '#version 300 es',
+    'precision highp float;',
+    'void main(){',
+    '  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);',
+    '  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);',
+    '}'
+  ].join('\n');
+
+  // Fragment: 3D gradient fBm with procedural hash33, priority-stack weights
+  // packed as RGBA (w0=A, w1=B, w2=C, w3=D). RGBA8 framebuffer quantizes to 1/255
+  // precision — visually indistinguishable from float weights for blending.
+  var fsSrc = [
+    '#version 300 es',
+    'precision highp float;',
+    'out vec4 fragColor;',
+    'uniform vec2 uResolution;',
+    'uniform vec2 uOffset;',
+    'uniform float uNoiseScale;',
+    'uniform float uNoiseTime;',
+    'uniform float uNoiseZScale;',
+    'uniform float uLayerFreqSpread;',
+    'uniform float uMaskThreshold;',
+    'uniform float uMaskEdgeSharpness;',
+    'uniform float uOctaves;',
+    'uniform float uRefSpan;',
+    'uniform vec3 uPhase[4];',
+    'uniform vec3 uSeedOffset;',
+    'vec3 hash33(vec3 p){',
+    '  p = fract(p * 0.1031);',
+    '  p += dot(p, p.yxz + 33.33);',
+    '  return fract((p.xxy + p.yzz) * p.zyx);',
+    '}',
+    'float gradNoise3(vec3 p){',
+    '  vec3 i = floor(p);',
+    '  vec3 f = fract(p);',
+    '  vec3 u = f * f * (3.0 - 2.0 * f);',
+    '  vec3 g000 = normalize(hash33(i + vec3(0,0,0)) * 2.0 - 1.0);',
+    '  vec3 g100 = normalize(hash33(i + vec3(1,0,0)) * 2.0 - 1.0);',
+    '  vec3 g010 = normalize(hash33(i + vec3(0,1,0)) * 2.0 - 1.0);',
+    '  vec3 g110 = normalize(hash33(i + vec3(1,1,0)) * 2.0 - 1.0);',
+    '  vec3 g001 = normalize(hash33(i + vec3(0,0,1)) * 2.0 - 1.0);',
+    '  vec3 g101 = normalize(hash33(i + vec3(1,0,1)) * 2.0 - 1.0);',
+    '  vec3 g011 = normalize(hash33(i + vec3(0,1,1)) * 2.0 - 1.0);',
+    '  vec3 g111 = normalize(hash33(i + vec3(1,1,1)) * 2.0 - 1.0);',
+    '  float n000 = dot(g000, f - vec3(0,0,0));',
+    '  float n100 = dot(g100, f - vec3(1,0,0));',
+    '  float n010 = dot(g010, f - vec3(0,1,0));',
+    '  float n110 = dot(g110, f - vec3(1,1,0));',
+    '  float n001 = dot(g001, f - vec3(0,0,1));',
+    '  float n101 = dot(g101, f - vec3(1,0,1));',
+    '  float n011 = dot(g011, f - vec3(0,1,1));',
+    '  float n111 = dot(g111, f - vec3(1,1,1));',
+    '  float nx00 = mix(n000, n100, u.x);',
+    '  float nx10 = mix(n010, n110, u.x);',
+    '  float nx01 = mix(n001, n101, u.x);',
+    '  float nx11 = mix(n011, n111, u.x);',
+    '  float nxy0 = mix(nx00, nx10, u.y);',
+    '  float nxy1 = mix(nx01, nx11, u.y);',
+    '  return mix(nxy0, nxy1, u.z);',
+    '}',
+    'float fbm3(vec3 p, float octaves){',
+    '  float oc = clamp(octaves, 1.0, 14.0);',
+    '  float full = floor(oc);',
+    '  float frac = oc - full;',
+    '  float amp = 1.0;',
+    '  float freq = 1.0;',
+    '  float sum = 0.0;',
+    '  float norm = 0.0;',
+    '  for (int i = 0; i < 14; i++) {',
+    '    if (float(i) >= full) break;',
+    '    sum += amp * gradNoise3(p * freq);',
+    '    norm += amp;',
+    '    amp *= 0.5;',
+    '    freq *= 2.0;',
+    '  }',
+    '  if (frac > 1e-6) {',
+    '    sum += frac * amp * gradNoise3(p * freq);',
+    '    norm += frac * amp;',
+    '  }',
+    '  return norm > 1e-6 ? sum / norm : 0.0;',
+    '}',
+    'float sigmoidClaim(float v01, float thr, float sharp){',
+    '  return 1.0 / (1.0 + exp(-(v01 - thr) * sharp));',
+    '}',
+    'void main(){',
+    // Y-flip so gl_FragCoord.y=H draws the visual top row. HTMLCanvas reads
+    // top-down, so tf.browser.fromPixels picks this up with the right orientation.
+    '  vec2 uvPx = vec2(gl_FragCoord.x - 0.5, uResolution.y - gl_FragCoord.y + 0.5);',
+    '  vec2 base = (uvPx / uRefSpan) * uNoiseScale + uOffset;',
+    '  float z = uNoiseTime * uNoiseZScale + uSeedOffset.z;',
+    '  float a1 = 0.0, a2 = 0.0, a3 = 0.0;',
+    '  for (int l = 1; l < 4; l++) {',
+    '    float lmul = 1.0 + uLayerFreqSpread * float(l) * 0.28;',
+    '    vec3 ph = uPhase[l];',
+    '    vec3 p = vec3(base * lmul + ph.xy + uSeedOffset.xy, z + ph.z * 0.15);',
+    '    float raw = fbm3(p, uOctaves);',
+    '    float m01 = clamp(raw * 0.5 + 0.5, 0.0, 1.0);',
+    '    float a = sigmoidClaim(m01, uMaskThreshold, uMaskEdgeSharpness);',
+    '    if (l == 1) a1 = a;',
+    '    else if (l == 2) a2 = a;',
+    '    else a3 = a;',
+    '  }',
+    '  float rem3 = 1.0 - a3;',
+    '  float rem23 = rem3 * (1.0 - a2);',
+    '  float w3 = a3;',
+    '  float w2 = rem3 * a2;',
+    '  float w1 = rem23 * a1;',
+    // w0 is omitted here: it is the priority-stack remainder and is
+    // recovered exactly on the tfjs side as 1 - (w1+w2+w3). Alpha is
+    // forced to 1.0 because the canvas context was created with
+    // alpha:false and the browser may clobber the alpha byte on readback.
+    '  fragColor = vec4(w1, w2, w3, 1.0);',
+    '}'
+  ].join('\n');
+
+  try {
+    var program = createProgram(gl, vsSrc, fsSrc);
+    var vao = gl.createVertexArray();
+
+    perlinGpu.ready = true;
+    perlinGpu.canvas = c;
+    perlinGpu.gl = gl;
+    perlinGpu.program = program;
+    perlinGpu.vao = vao;
+    perlinGpu.uniform = {
+      resolution: gl.getUniformLocation(program, 'uResolution'),
+      offset: gl.getUniformLocation(program, 'uOffset'),
+      noiseScale: gl.getUniformLocation(program, 'uNoiseScale'),
+      noiseTime: gl.getUniformLocation(program, 'uNoiseTime'),
+      noiseZScale: gl.getUniformLocation(program, 'uNoiseZScale'),
+      layerFreqSpread: gl.getUniformLocation(program, 'uLayerFreqSpread'),
+      maskThreshold: gl.getUniformLocation(program, 'uMaskThreshold'),
+      maskEdgeSharpness: gl.getUniformLocation(program, 'uMaskEdgeSharpness'),
+      octaves: gl.getUniformLocation(program, 'uOctaves'),
+      refSpan: gl.getUniformLocation(program, 'uRefSpan'),
+      phase: gl.getUniformLocation(program, 'uPhase'),
+      seedOffset: gl.getUniformLocation(program, 'uSeedOffset')
+    };
+    return true;
+  } catch (err) {
+    disposePerlinGpu();
+    console.error('Perlin GPU init failed:', err);
+    return false;
+  }
+}
+
+function renderPerlinToCanvas() {
+  if (!perlinGpu.ready && !initPerlinGpu()) return false;
+  var gl = perlinGpu.gl;
+  var u = perlinGpu.uniform;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(perlinGpu.program);
+  gl.bindVertexArray(perlinGpu.vao);
+  gl.uniform2f(u.resolution, W, H);
+  gl.uniform2f(u.offset, 0, 0);
+  gl.uniform1f(u.noiseScale, noiseScale);
+  gl.uniform1f(u.noiseTime, noiseTime);
+  gl.uniform1f(u.noiseZScale, noiseZScale);
+  gl.uniform1f(u.layerFreqSpread, Math.max(0, Math.min(1, layerFreqSpread)));
+  gl.uniform1f(u.maskThreshold, Math.max(0.02, Math.min(0.98, maskThreshold)));
+  gl.uniform1f(u.maskEdgeSharpness, Math.max(0.5, Math.min(50, maskEdgeSharpness)));
+  gl.uniform1f(u.octaves, Math.max(1, Math.min(14, noiseOctaves)));
+  gl.uniform1f(u.refSpan, noiseSpaceRef());
+  gl.uniform3fv(u.phase, new Float32Array([
+    LAYER_PHASE[0][0], LAYER_PHASE[0][1], LAYER_PHASE[0][2],
+    LAYER_PHASE[1][0], LAYER_PHASE[1][1], LAYER_PHASE[1][2],
+    LAYER_PHASE[2][0], LAYER_PHASE[2][1], LAYER_PHASE[2][2],
+    LAYER_PHASE[3][0], LAYER_PHASE[3][1], LAYER_PHASE[3][2]
+  ]));
+  gl.uniform3f(u.seedOffset, noiseSeedOffset[0], noiseSeedOffset[1], noiseSeedOffset[2]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindVertexArray(null);
+  return true;
+}
+
+// ====== Pure-tfjs Perlin: faithful port of the WebGL shader ======
+// One-time (re)build of a [H, W, 2] tensor of pixel-center coords (col, row).
+// Matches the shader which computes (uvPx.x = col, uvPx.y ≈ row+1); the 1-px
+// vertical offset is imperceptible at 768×432 so we use exact indices.
+function rebuildPerlinPixelXY() {
+  if (perlinPixelXY) { perlinPixelXY.dispose(); perlinPixelXY = null; }
+  perlinPixelXY = tf.tidy(function() {
+    var xs = tf.range(0, W, 1, 'float32').reshape([1, W, 1]).tile([H, 1, 1]);
+    var ys = tf.range(0, H, 1, 'float32').reshape([H, 1, 1]).tile([1, W, 1]);
+    return tf.keep(tf.concat([xs, ys], -1));  // [H, W, 2]
+  });
+}
+
+// Port of GLSL hash33(p):
+//   p = fract(p * 0.1031)
+//   p += dot(p, p.yxz + 33.33)
+//   return fract((p.xxy + p.yzz) * p.zyx)
+function hash33Tfjs(p) {
+  // p: [B, H, W, 3]
+  var q = p.mul(0.1031);
+  q = q.sub(q.floor());
+  var qx = q.slice([0, 0, 0, 0], [-1, -1, -1, 1]);
+  var qy = q.slice([0, 0, 0, 1], [-1, -1, -1, 1]);
+  var qz = q.slice([0, 0, 0, 2], [-1, -1, -1, 1]);
+  var yxz = tf.concat([qy, qx, qz], -1);
+  var dp = q.mul(yxz.add(33.33)).sum(-1, true);  // [B,H,W,1]
+  q = q.add(dp);
+  var qx2 = q.slice([0, 0, 0, 0], [-1, -1, -1, 1]);
+  var qy2 = q.slice([0, 0, 0, 1], [-1, -1, -1, 1]);
+  var qz2 = q.slice([0, 0, 0, 2], [-1, -1, -1, 1]);
+  var xxy = tf.concat([qx2, qx2, qy2], -1);
+  var yzz = tf.concat([qy2, qz2, qz2], -1);
+  var zyx = tf.concat([qz2, qy2, qx2], -1);
+  var r = xxy.add(yzz).mul(zyx);
+  return r.sub(r.floor());  // [B,H,W,3] in [0,1]
+}
+
+function normalizedGradientTfjs(pCorner) {
+  var h = hash33Tfjs(pCorner);
+  var g = h.mul(2).sub(1);                     // [-1, 1]
+  var len2 = g.square().sum(-1, true);
+  var len = len2.add(1e-12).sqrt();
+  return g.div(len);                           // unit vectors
+}
+
+// 3D gradient noise, batched on the leading axis (B = 3 layers).
+function gradNoise3DTfjs(p) {
+  // p: [B, H, W, 3]
+  var pi = p.floor();
+  var pf = p.sub(pi);
+  var u = pf.square().mul(tf.sub(3, pf.mul(2)));  // smoothstep fade
+
+  function corner(ox, oy, oz) {
+    var co = tf.tensor1d([ox, oy, oz]);
+    var cc = pi.add(co);                         // [B,H,W,3]
+    var g = normalizedGradientTfjs(cc);          // [B,H,W,3]
+    var delta = pf.sub(co);                      // [B,H,W,3]
+    return g.mul(delta).sum(-1);                 // [B,H,W]
+  }
+
+  var n000 = corner(0, 0, 0);
+  var n100 = corner(1, 0, 0);
+  var n010 = corner(0, 1, 0);
+  var n110 = corner(1, 1, 0);
+  var n001 = corner(0, 0, 1);
+  var n101 = corner(1, 0, 1);
+  var n011 = corner(0, 1, 1);
+  var n111 = corner(1, 1, 1);
+
+  var uX = u.slice([0, 0, 0, 0], [-1, -1, -1, 1]).squeeze([-1]);
+  var uY = u.slice([0, 0, 0, 1], [-1, -1, -1, 1]).squeeze([-1]);
+  var uZ = u.slice([0, 0, 0, 2], [-1, -1, -1, 1]).squeeze([-1]);
+
+  function lerp(a, b, t) { return a.add(b.sub(a).mul(t)); }
+  var nx00 = lerp(n000, n100, uX);
+  var nx10 = lerp(n010, n110, uX);
+  var nx01 = lerp(n001, n101, uX);
+  var nx11 = lerp(n011, n111, uX);
+  var nxy0 = lerp(nx00, nx10, uY);
+  var nxy1 = lerp(nx01, nx11, uY);
+  return lerp(nxy0, nxy1, uZ);   // [B,H,W] in ~[-1,1]
+}
+
+function buildMaskTensorTfjs(skipPreview) {
+  if (!perlinPixelXY) rebuildPerlinPixelXY();
+  var prev = quartileMaskTensor;
+  quartileMaskTensor = tf.tidy(function() {
+    var refSpan = noiseSpaceRef();
+    var spread = Math.max(0, Math.min(1, layerFreqSpread));
+    var thr = Math.max(0.02, Math.min(0.98, maskThreshold));
+    var sharp = Math.max(0.5, Math.min(50, maskEdgeSharpness));
+    var oc = Math.max(1, Math.min(14, noiseOctaves));
+    var full = Math.floor(oc);
+    var frac = oc - full;
+    var z = noiseTime * noiseZScale + noiseSeedOffset[2];
+
+    // Scale pixel indices to noise space: base = pixelXY * (scale/ref) + seedXY.
+    var base = perlinPixelXY
+      .mul(noiseScale / refSpan)
+      .add(tf.tensor1d([noiseSeedOffset[0], noiseSeedOffset[1]]));
+
+    // Stack 3 layers (l=1,2,3) with per-layer freq multiplier and phase.
+    var layers = [];
+    for (var l = 1; l <= 3; l++) {
+      var lmul = 1 + spread * l * 0.28;
+      var ph = LAYER_PHASE[l];
+      var xy = base.mul(lmul).add(tf.tensor1d([ph[0], ph[1]]));        // [H,W,2]
+      var zSlice = tf.fill([H, W, 1], z + ph[2] * 0.15);
+      layers.push(tf.concat([xy, zSlice], -1));                         // [H,W,3]
+    }
+    var coords = tf.stack(layers, 0);  // [3, H, W, 3]
+
+    // fBm: accumulate `full` integer octaves + fractional trailing octave.
+    var sum = tf.zeros([3, H, W]);
+    var amp = 1.0, freq = 1.0, norm = 0.0;
+    for (var i = 0; i < full; i++) {
+      sum = sum.add(gradNoise3DTfjs(coords.mul(freq)).mul(amp));
+      norm += amp;
+      amp *= 0.5;
+      freq *= 2.0;
+    }
+    if (frac > 1e-6) {
+      sum = sum.add(gradNoise3DTfjs(coords.mul(freq)).mul(amp * frac));
+      norm += amp * frac;
+    }
+    var raw = sum.div(Math.max(norm, 1e-6));                  // [3,H,W]
+
+    // Sigmoid claim per layer, then priority-stack to w1/w2/w3.
+    var m01 = raw.mul(0.5).add(0.5).clipByValue(0, 1);
+    var a = tf.sigmoid(m01.sub(thr).mul(sharp));              // [3,H,W]
+    var a1 = a.slice([0, 0, 0], [1, -1, -1]).squeeze([0]);
+    var a2 = a.slice([1, 0, 0], [1, -1, -1]).squeeze([0]);
+    var a3 = a.slice([2, 0, 0], [1, -1, -1]).squeeze([0]);
+
+    var rem3 = tf.sub(1, a3);
+    var rem23 = rem3.mul(tf.sub(1, a2));
+    var w3 = a3;
+    var w2 = rem3.mul(a2);
+    var w1 = rem23.mul(a1);
+    var w0 = tf.sub(1, w1.add(w2).add(w3)).clipByValue(0, 1);
+
+    var mask = tf.stack([w0, w1, w2, w3], -1);                // [H,W,4]
+    return mask.expandDims(0);                                // [1,H,W,4]
+  });
+  if (prev) prev.dispose();
+  if (!skipPreview) schedulePreviewDraw();
+}
+
+// ====== Brush weight CPU compose ======
+// Reproduces reference buildMaskTensor's brush block verbatim: per-pixel claim
+// from ownership + mask*life (bezier eased), priority-stacked to weights, and
+// a `remBrush` remainder scaling the base Perlin weights. Done on CPU because
+// brush CPU state is already the source of truth (paint, diffuse, drip loops).
+function recomputeBrushCpu() {
+  var n = brushModels.length;
+  ensureBrushCpuBuffers();
+  var thr = Math.max(0.02, Math.min(0.98, maskThreshold));
+  var sharp = Math.max(0.5, Math.min(50, maskEdgeSharpness));
+  if (n === 0) {
+    remBrushCpu.fill(1);
+    return;
+  }
+  var weights = brushWeightsCpu;
+  var rem = remBrushCpu;
+  var claims = new Float32Array(n);
+  var total = W * H;
+  for (var idx = 0; idx < total; idx++) {
+    var ownerId = strokeModelMap[idx];
+    for (var bi = 0; bi < n; bi++) {
+      var bm = brushModels[bi];
+      if (ownerId !== bm.id) { claims[bi] = 0; continue; }
+      var d = bm.mask[idx];
+      if (d < 0) d = 0; else if (d > 1) d = 1;
+      var claim = 0;
+      if (d > DRAW_MASK_EPS) {
+        if (!drawDecayEnabled) {
+          claim = 1.0;
+        } else {
+          var life = bm.life[idx];
+          if (life < 0) life = 0; else if (life > 1) life = 1;
+          var strengthEase = cubicBezier01(life, drawStrengthBezierP1, drawStrengthBezierP2);
+          var edgeEase = cubicBezier01(life, drawEdgeBezierP1, drawEdgeBezierP2);
+          var drawStrength = 1.0 - strengthEase;
+          var drawSharp = maskEdgeSharpness * Math.pow(drawEdgeSharpMin / maskEdgeSharpness, edgeEase);
+          var drawThr = thr * (1.0 - 0.4 * edgeEase);
+          claim = sigmoidClaim(d, drawThr, drawSharp) * drawStrength;
+        }
+      }
+      claims[bi] = claim;
+    }
+    var remBrush = 1.0;
+    var baseOut = idx * n;
+    for (var wb = n - 1; wb >= 0; wb--) {
+      var wv = remBrush * claims[wb];
+      weights[baseOut + wb] = wv;
+      remBrush *= (1.0 - claims[wb]);
+    }
+    rem[idx] = remBrush;
+  }
+}
+
+function uploadBrushTensors() {
+  if (brushWeightsTensor) { brushWeightsTensor.dispose(); brushWeightsTensor = null; }
+  if (remBrushTensor) { remBrushTensor.dispose(); remBrushTensor = null; }
+  var n = brushModels.length;
+  if (n === 0) return;
+  brushWeightsTensor = tf.tensor4d(brushWeightsCpu.subarray(0, W * H * n), [1, H, W, n]);
+  remBrushTensor = tf.tensor4d(remBrushCpu, [1, H, W, 1]);
+}
+
+// Build the priority-stack weight tensor:
+//   WebGL Perlin shader → fromPixels → base4 tensor; brush weights composed on
+//   CPU (same source of truth as the painting loop), uploaded + concatenated.
+function buildMaskTensor(skipPreview) {
+  if (!renderPerlinToCanvas()) return;
+  if (brushStateDirty) {
+    recomputeBrushCpu();
+    uploadBrushTensors();
+    brushStateDirty = false;
+  }
+  var n = brushModels.length;
+  var prev = quartileMaskTensor;
+  quartileMaskTensor = tf.tidy(function() {
+    var raw = tf.browser.fromPixels(perlinGpu.canvas, 3).toFloat().div(255.0);
+    var w1 = raw.slice([0, 0, 0], [H, W, 1]);
+    var w2 = raw.slice([0, 0, 1], [H, W, 1]);
+    var w3 = raw.slice([0, 0, 2], [H, W, 1]);
+    var w0 = tf.clipByValue(tf.sub(1, tf.add(tf.add(w1, w2), w3)), 0, 1);
+    var base = tf.concat([w0, w1, w2, w3], -1);
+    var cleaned = tf.where(base.greater(0.01), base, tf.zerosLike(base)).expandDims(0);
+    if (n === 0) return cleaned;
+    var dampened = tf.mul(cleaned, remBrushTensor);
+    return tf.concat([dampened, brushWeightsTensor], 3);
+  });
+  if (prev) prev.dispose();
+  if (!skipPreview) schedulePreviewDraw();
+}
+
+// ====== Perception Kernel: identity, sobel_x, sobel_y, laplacian ======
+function buildPerceptionKernel() {
+  if (perceptionKernel) perceptionKernel.dispose();
+  var identity = [0,0,0, 0,1,0, 0,0,0];
+  var sobelX   = [-1,0,1, -2,0,2, -1,0,1].map(function(v){return v/8;});
+  var sobelY   = [-1,-2,-1, 0,0,0, 1,2,1].map(function(v){return v/8;});
+  var lap      = [1,2,1, 2,-12,2, 1,2,1].map(function(v){return v/8;});
+  var filters = [identity, sobelX, sobelY, lap];
+  var data = new Float32Array(3 * 3 * CH * FILTER_N);
+  for (var c = 0; c < CH; c++) {
+    for (var f = 0; f < FILTER_N; f++) {
+      for (var p = 0; p < 9; p++) {
+        data[p * CH * FILTER_N + c * FILTER_N + f] = filters[f][p];
+      }
+    }
+  }
+  perceptionKernel = tf.tensor4d(data, [3, 3, CH, FILTER_N]);
+}
+
+// ====== Direction map (alignment + rotation) ======
+function buildDirectionMap() {
+  if (dirCos) dirCos.dispose();
+  if (dirSin) dirSin.dispose();
+  var cosData = new Float32Array(H * W);
+  var sinData = new Float32Array(H * W);
+  var angleRad = rotationAngle / 180.0 * Math.PI;
+  var globalCos = Math.cos(angleRad);
+  var globalSin = Math.sin(angleRad);
+
+  for (var y = 0; y < H; y++) {
+    for (var x = 0; x < W; x++) {
+      var dirX = 0, dirY = 1;
+      if (alignment === 1) {
+        dirX = x - W * 0.5; dirY = y - H * 0.5;
+        var len = Math.sqrt(dirX * dirX + dirY * dirY);
+        if (len > 0.001) { dirX /= len; dirY /= len; }
+        else { dirX = 0; dirY = 1; }
+      } else if (alignment === 2) {
+        var v1x = x - W * 0.25, v1y = y - H * 0.25;
+        var v2x = W * 0.75 - x, v2y = H * 0.75 - y;
+        var l1 = Math.sqrt(v1x * v1x + v1y * v1y);
+        var l2 = Math.sqrt(v2x * v2x + v2y * v2y);
+        var l1_3 = l1 * l1 * l1 || 1;
+        var l2_3 = l2 * l2 * l2 || 1;
+        dirX = v1x / l1_3 + v2x / l2_3;
+        dirY = v1y / l1_3 + v2y / l2_3;
+        var len2 = Math.sqrt(dirX * dirX + dirY * dirY);
+        if (len2 > 0.001) { dirX /= len2; dirY /= len2; }
+        else { dirX = 0; dirY = 1; }
+      }
+      var rdx = dirX * globalCos - dirY * globalSin;
+      var rdy = dirX * globalSin + dirY * globalCos;
+      var idx = y * W + x;
+      cosData[idx] = rdy;
+      sinData[idx] = rdx;
+    }
+  }
+  dirCos = tf.tensor4d(cosData, [1, H, W, 1]);
+  dirSin = tf.tensor4d(sinData, [1, H, W, 1]);
+}
+
+// ====== Init ======
+async function initTF() {
+  // Float16 textures on WebGL: halves memory bandwidth on all NCA tensors
+  // (weights, activations). Visual precision is fine for this model since
+  // values live in [-2, 2] and 11 bits of mantissa is more than enough.
+  // Must be set before the backend initializes.
+  tf.env().set('WEBGL_FORCE_F16_TEXTURES', true);
+
+  var supportsWebGpuApi = typeof navigator !== 'undefined' && !!navigator.gpu;
+  // Try WebGL first on integrated GPUs: the WebGL path has more mature driver
+  // optimizations for small-kernel workloads like ours, and the F16 flag above
+  // only applies to the WebGL backend. WebGPU stays as a fallback so nothing
+  // breaks on machines without WebGL2.
+  var backendOrder = supportsWebGpuApi ? ['webgl', 'webgpu', 'cpu'] : ['webgl', 'cpu'];
+  var selected = null;
+  var errors = [];
+  for (var i = 0; i < backendOrder.length; i++) {
+    var candidate = backendOrder[i];
+    try {
+      await tf.setBackend(candidate);
+      await tf.ready();
+      selected = tf.getBackend();
+      if (selected === candidate) break;
+    } catch (e) {
+      errors.push(candidate + ': ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+  if (!selected) throw new Error('No TF backend available. ' + errors.join(' | '));
+  backendName = selected;
+  if (selected === 'webgl') {
+    backendNote = tf.env().getBool('WEBGL_FORCE_F16_TEXTURES') ? 'F16 textures' : '';
+  } else if (selected === 'webgpu') {
+    backendNote = 'WebGL unavailable, WebGPU fallback';
+  } else {
+    backendNote = 'CPU fallback';
+  }
+  statusEl.textContent = backendStatusPrefix();
+  buildPaletteTensor();
+  initCanvas();
+}
+
+function initCanvas() {
+  if (state) state.dispose();
+  disposePerlinGpu();
+  state = tf.variable(tf.zeros([1, H, W, CH]));
+  buildPerceptionKernel();
+  buildDirectionMap();
+  initPerlinGpu();
+  rebuildPerlinPixelXY();
+  ensureStrokeMaps();
+  ensureBrushCpuBuffers();
+  brushStateDirty = true;
+  buildMaskTensor();
+  canvas.width = W;
+  canvas.height = H;
+  noisePreviewCanvas.width = W;
+  noisePreviewCanvas.height = H;
+  updateCanvasSize();
+  stepCount = 0;
+  if (!animId) render();
+}
+
+function updateCanvasSize() {
+  var dw = Math.max(1, Math.round(W * zoom));
+  var dh = Math.max(1, Math.round(H * zoom));
+  canvas.style.width = dw + 'px';
+  canvas.style.height = dh + 'px';
+  noisePreviewCanvas.style.width = dw + 'px';
+  noisePreviewCanvas.style.height = dh + 'px';
+}
+
+function upscaleSimulation2x() {
+  if (isUpscaling) return;
+  var newW = W * 2;
+  var newH = H * 2;
+  if (newW > 4096 || newH > 4096) {
+    alert('Reached safety limit (4096). Current: ' + W + '×' + H);
+    return;
+  }
+  isUpscaling = true;
+  statusEl.textContent = 'Upscaling simulation to ' + newW + '×' + newH + '...';
+  try {
+    var resizedState = state ? tf.tidy(function() {
+      return tf.image.resizeBilinear(state, [newH, newW], true);
+    }) : tf.zeros([1, newH, newW, CH]);
+
+    if (quartileMaskTensor) { quartileMaskTensor.dispose(); quartileMaskTensor = null; }
+    if (state) { state.dispose(); state = null; }
+
+    W = newW;
+    H = newH;
+    state = tf.variable(resizedState);
+    resizedState.dispose();
+
+    canvas.width = W;
+    canvas.height = H;
+    noisePreviewCanvas.width = W;
+    noisePreviewCanvas.height = H;
+    disposePerlinGpu();
+    initPerlinGpu();
+    buildDirectionMap();
+    rebuildPerlinPixelXY();
+    strokeOrderMap = new Uint32Array(0);
+    strokeModelMap = new Int32Array(0);
+    ensureStrokeMaps();
+    brushModels.forEach(function(bm) { allocBrushMaskArrays(bm); });
+    ensureBrushCpuBuffers();
+    brushStateDirty = true;
+    buildMaskTensor();
+    updateCanvasSize();
+
+    statusEl.textContent = backendStatusPrefix() + ' | Upscaled to ' + W + '×' + H;
+  } catch (err) {
+    alert('Upscale failed: ' + err.message);
+  } finally {
+    isUpscaling = false;
+  }
+}
+
+// ====== .npy loader (pickle-wrapped object array of two float32 matrices) ======
+function parseNpyPickle(arrayBuffer) {
+  var bytes = new Uint8Array(arrayBuffer);
+  var headerLen = bytes[8] | (bytes[9] << 8);
+  var pickleStart = 10 + headerLen;
+
+  var dataBlocks = [];
+  var i = pickleStart;
+  while (i < bytes.length) {
+    if (bytes[i] === 0x42) {
+      var len = bytes[i+1] | (bytes[i+2]<<8) | (bytes[i+3]<<16) | (bytes[i+4]<<24);
+      if (len > 100) {
+        var blockData = arrayBuffer.slice(i + 5, i + 5 + len);
+        dataBlocks.push(new Float32Array(blockData));
+      }
+      i += 5 + len;
+    } else if (bytes[i] === 0x43) {
+      var slen = bytes[i+1];
+      i += 2 + slen;
+    } else {
+      i += 1;
+    }
+  }
+
+  if (dataBlocks.length < 2) {
+    throw new Error('Could not find 2 weight matrices in .npy file (found ' + dataBlocks.length + ')');
+  }
+
+  var d1 = dataBlocks[0];
+  var d2 = dataBlocks[1];
+  var ch_guess = 12;
+  var hidden_guess = d1.length / (ch_guess * FILTER_N + 1);
+  if (hidden_guess !== Math.floor(hidden_guess)) {
+    throw new Error('Cannot infer dense1 shape: ' + d1.length + ' floats');
+  }
+  var perception_n = ch_guess * FILTER_N;
+  var hidden = hidden_guess;
+  return { d1: d1, d2: d2, ch: ch_guess, hidden: hidden, perception_n: perception_n };
+}
+
+function loadModelFromNpy(arrayBuffer, name) {
+  var parsed = parseNpyPickle(arrayBuffer);
+  var pn = parsed.perception_n;
+  var hid = parsed.hidden;
+  var ch = parsed.ch;
+  var d1w = parsed.d1.slice(0, pn * hid);
+  var d1b = parsed.d1.slice(pn * hid, (pn + 1) * hid);
+  var d2w = parsed.d2.slice(0, hid * ch);
+  var d2b = parsed.d2.slice(hid * ch, (hid + 1) * ch);
+  return {
+    name: name,
+    dense1k: tf.tensor4d(d1w, [1, 1, pn, hid]),
+    dense1b: tf.tensor1d(d1b),
+    dense2k: tf.tensor4d(d2w, [1, 1, hid, ch]),
+    dense2b: tf.tensor1d(d2b),
+    ch: ch,
+    hidden: hid
+  };
+}
+
+// ====== NCA Step ======
+function countLoadedModels() { return loadedSlotIndices.length; }
+
+// Periodic (torus) padding: wrap the W/H edges before depthwise conv.
+function periodicPad(x, pad) {
+  var top = x.slice([0, H - pad, 0, 0], [1, pad, W, CH]);
+  var bottom = x.slice([0, 0, 0, 0], [1, pad, W, CH]);
+  var vert = tf.concat([top, x, bottom], 1);
+  var newH = H + 2 * pad;
+  var left = vert.slice([0, 0, W - pad, 0], [1, newH, pad, CH]);
+  var right = vert.slice([0, 0, 0, 0], [1, newH, pad, CH]);
+  return tf.concat([left, vert, right], 2);
+}
+
+function ncaStep() {
+  var N = loadedSlotIndices.length;
+  if (N === 0 || !quartileMaskTensor || !batchedDense1k) return;
+  tf.tidy(function() {
+    var x = state;
+    var padded = periodicPad(x, 1);
+    var rawPerceived = tf.depthwiseConv2d(padded, perceptionKernel, 1, 'valid');
+
+    var p4 = rawPerceived.reshape([1, H, W, CH, 4]);
+    var pId  = p4.slice([0,0,0,0,0], [-1,-1,-1,-1,1]);
+    var pDx  = p4.slice([0,0,0,0,1], [-1,-1,-1,-1,1]);
+    var pDy  = p4.slice([0,0,0,0,2], [-1,-1,-1,-1,1]);
+    var pLap = p4.slice([0,0,0,0,3], [-1,-1,-1,-1,1]);
+
+    var c5 = dirCos.expandDims(3);
+    var s5 = dirSin.expandDims(3);
+    var rotDx = tf.sub(tf.mul(pDx, c5), tf.mul(pDy, s5));
+    var rotDy = tf.add(tf.mul(pDx, s5), tf.mul(pDy, c5));
+    var rotated = tf.concat([pId, rotDx, rotDy, pLap], 4);
+    var perceived = rotated.reshape([1, H, W, CH * FILTER_N]);
+
+    // Batched dense1: one conv covers every loaded model's hidden layer.
+    var h1Big = tf.relu(tf.add(
+      tf.conv2d(perceived, batchedDense1k, 1, 'same'),
+      batchedDense1b
+    )); // [1, H, W, N*HIDDEN]
+
+    // Batched dense2 via native 3D matMul (einsum had perf/correctness issues).
+    // Reshape h1Big [1,H,W,N*HIDDEN] → [H*W,N,HIDDEN] → [N,H*W,HIDDEN]
+    // then matMul with batchedDense2k [N,HIDDEN,CH] → [N,H*W,CH].
+    var h1 = h1Big.reshape([H * W, N, batchedHidden]).transpose([1, 0, 2]);
+    var dxN = tf.matMul(h1, batchedDense2k);            // [N, H*W, CH]
+    dxN = tf.add(dxN, batchedDense2b.expandDims(1));    // broadcast [N,1,CH]
+
+    // Per-model weight at each pixel; gather only loaded slots (base + brush).
+    var total = totalModelCount();
+    var qmFlat = quartileMaskTensor.reshape([H * W, total]);
+    var maskNP = tf.gather(qmFlat, loadedSlotsIdxTensor, 1)  // [H*W, N]
+      .transpose([1, 0]).expandDims(-1);                      // [N, H*W, 1]
+
+    var combinedDx = tf.sum(tf.mul(dxN, maskNP), 0)     // [H*W, CH]
+      .reshape([1, H, W, CH]);
+
+    var updateMask = tf.randomUniform([1, H, W, 1]).less(0.5);
+    var dxMasked = tf.mul(combinedDx, tf.cast(updateMask, 'float32'));
+    var newState = tf.add(x, dxMasked);
+    state.assign(tf.clipByValue(newState, -2.0, 2.0));
+  });
+}
+
+function applyDisturbance() {
+  tf.tidy(function() {
+    var t = 2.0 * Date.now() / 1000.0;
+    var cx = Math.sin(t * 2) * W / 3 + W / 2;
+    var cy = Math.cos(t * 3.1) * H / 3 + H / 2;
+    var r = 20;
+    var xs = tf.range(0, W).reshape([1, W]).tile([H, 1]);
+    var ys = tf.range(0, H).reshape([H, 1]).tile([1, W]);
+    var distSq = tf.add(tf.square(tf.sub(xs, cx)), tf.square(tf.sub(ys, cy)));
+    var keepMask = distSq.greater(r * r).expandDims(0).expandDims(-1);
+    state.assign(tf.mul(state, tf.cast(keepMask, 'float32')));
+  });
+}
+
+// ====== Display: all on GPU, no CPU readback loop ======
+// 1. Build the display tensor entirely from existing GPU tensors:
+//    - state RGB (channels 0..2) → visible [0,1]
+//    - optional tint = weights @ palette, blended with alpha
+// 2. tf.browser.toPixels streams the result to the display canvas (tfjs uses
+//    its async data() path internally, so main-thread stays free).
+function drawMainDisplay() {
+  if (!state || displayPending) return;
+  var display = tf.tidy(function() {
+    var rgb = state.squeeze([0])
+      .slice([0, 0, 0], [H, W, 3])
+      .mul(0.5).add(0.5)
+      .clipByValue(0, 1);
+    if (showMask && quartileMaskTensor && paletteTensor) {
+      var total = totalModelCount();
+      var w = quartileMaskTensor.squeeze([0]).reshape([H * W, total]);
+      var tinted = tf.matMul(w, paletteTensor).reshape([H, W, 3]);
+      var alpha = 0.24;
+      return rgb.mul(1 - alpha).add(tinted.mul(alpha)).clipByValue(0, 1);
+    }
+    return rgb;
+  });
+  displayPending = true;
+  tf.browser.toPixels(display, canvas).then(function() {
+    display.dispose();
+    displayPending = false;
+  }).catch(function(err) {
+    display.dispose();
+    displayPending = false;
+    console.error('toPixels(main) failed:', err);
+  });
+}
+
+function schedulePreviewDraw() {
+  if (!quartileMaskTensor || !paletteTensor || previewPending) return;
+  var preview = tf.tidy(function() {
+    var total = totalModelCount();
+    var w = quartileMaskTensor.squeeze([0]).reshape([H * W, total]);
+    return tf.matMul(w, paletteTensor).reshape([H, W, 3]).clipByValue(0, 1);
+  });
+  previewPending = true;
+  tf.browser.toPixels(preview, noisePreviewCanvas).then(function() {
+    preview.dispose();
+    previewPending = false;
+  }).catch(function(err) {
+    preview.dispose();
+    previewPending = false;
+    console.error('toPixels(preview) failed:', err);
+  });
+}
+
+// ====== Render loop ======
+function render(ts) {
+  if (typeof ts !== 'number') ts = performance.now();
+
+  // Timestamp gate: cap the loop to targetFps. rAF still fires at 60Hz; we
+  // just bail out of the 2nd and 3rd frames between work ticks. The -2ms
+  // tolerance absorbs small rAF jitter so we don't miss a frame by 0.5ms.
+  var frameInterval = 1000 / targetFps;
+  if (lastRenderTs !== 0 && (ts - lastRenderTs) < (frameInterval - 2)) {
+    animId = requestAnimationFrame(render);
+    return;
+  }
+  var dtMs = lastRenderTs === 0 ? frameInterval : (ts - lastRenderTs);
+  lastRenderTs = ts;
+  renderFrame++;
+
+  fpsSamples.push(ts);
+  if (fpsSamples.length > FPS_WINDOW) fpsSamples.shift();
+  if (fpsSamples.length >= 2) {
+    var span = fpsSamples[fpsSamples.length - 1] - fpsSamples[0];
+    fpsDisplay = span > 0 ? ((fpsSamples.length - 1) * 1000 / span) : 0;
+  }
+
+  // Mask must rebuild every render frame during animate, otherwise the
+  // Perlin motion visibly steps. NCA consuming it at half-rate is fine —
+  // the wasted rebuild is cheaper than the perceptual cost of jumpy noise.
+  var needRebuildMask = false;
+  if (sprayWhilePressing()) { brushStateDirty = true; needRebuildMask = true; }
+  if (evolveAllBrushMasks()) { brushStateDirty = true; needRebuildMask = true; }
+  if (noiseAnimate) {
+    noiseTime += noiseTimeSpeed * (dtMs / 16.667);
+    needRebuildMask = true;
+  }
+  if (needRebuildMask) {
+    buildMaskTensor((renderFrame % previewEveryNFrames) !== 0);
+  }
+
+  var shouldRunSimulation = (renderFrame % simulationEveryNFrames) === 0;
+  if (isActive && state && countLoadedModels() > 0 && shouldRunSimulation) {
+    for (var i = 0; i < stepsPerFrame; i++) {
+      if (disturbance) applyDisturbance();
+      ncaStep();
+      stepCount++;
+    }
+  }
+
+  if (state && (renderFrame % displayEveryNFrames) === 0) {
+    drawMainDisplay();
+  }
+
+  if ((renderFrame % infoEveryNFrames) === 0) {
+    var names = [];
+    for (var si = 0; si < BASE_MODELS; si++) {
+      names.push(baseModels[si] ? baseModels[si].name : '—');
+    }
+    for (var bi = 0; bi < brushModels.length; bi++) names.push(brushModels[bi].name);
+    infoEl.textContent = 'FPS: ' + fpsDisplay.toFixed(1) +
+      ' | Steps: ' + stepCount + ' | Tensors: ' + tf.memory().numTensors +
+      ' | ' + W + '×' + H + ' | ' + names.join(', ');
+  }
+  animId = requestAnimationFrame(render);
+}
+
+function disposeModel(m) {
+  if (!m) return;
+  m.dense1k.dispose(); m.dense1b.dispose(); m.dense2k.dispose(); m.dense2b.dispose();
+}
+
+function disposeBatchedWeights() {
+  if (batchedDense1k) { batchedDense1k.dispose(); batchedDense1k = null; }
+  if (batchedDense1b) { batchedDense1b.dispose(); batchedDense1b = null; }
+  if (batchedDense2k) { batchedDense2k.dispose(); batchedDense2k = null; }
+  if (batchedDense2b) { batchedDense2b.dispose(); batchedDense2b = null; }
+  if (loadedSlotsIdxTensor) { loadedSlotsIdxTensor.dispose(); loadedSlotsIdxTensor = null; }
+}
+
+// Fuse all currently-loaded models into batched weight tensors.
+// Call whenever the set of loaded models changes.
+function rebuildBatchedWeights() {
+  disposeBatchedWeights();
+  loadedSlotIndices = [];
+  var loaded = [];
+  for (var i = 0; i < BASE_MODELS; i++) {
+    if (baseModels[i]) { loadedSlotIndices.push(i); loaded.push(baseModels[i]); }
+  }
+  for (var bi = 0; bi < brushModels.length; bi++) {
+    var bm = brushModels[bi];
+    if (bm.model) { loadedSlotIndices.push(BASE_MODELS + bi); loaded.push(bm.model); }
+  }
+  if (loaded.length === 0) return;
+  batchedHidden = loaded[0].hidden;
+  tf.tidy(function() {
+    var k1 = tf.concat(loaded.map(function(m){ return m.dense1k; }), 3); // [1,1,pn,N*HIDDEN]
+    var b1 = tf.concat(loaded.map(function(m){ return m.dense1b; }), 0); // [N*HIDDEN]
+    // Each dense2k is [1,1,HIDDEN,CH] → squeeze spatial, stack → [N, HIDDEN, CH]
+    var k2 = tf.stack(loaded.map(function(m){ return m.dense2k.squeeze([0,1]); }), 0);
+    var b2 = tf.stack(loaded.map(function(m){ return m.dense2b; }), 0);     // [N, CH]
+    batchedDense1k = tf.keep(k1);
+    batchedDense1b = tf.keep(b1);
+    batchedDense2k = tf.keep(k2);
+    batchedDense2b = tf.keep(b2);
+  });
+  loadedSlotsIdxTensor = tf.tensor1d(loadedSlotIndices, 'int32');
+}
+
+// ====== File handling ======
+function handleBaseModelFile(file, slotIndex) {
+  if (!file.name.endsWith('.npy')) { alert('Please use .npy files'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var name = file.name.replace('.npy', '');
+      var m = loadModelFromNpy(e.target.result, name);
+      var labels = ['A', 'B', 'C', 'D'];
+      disposeModel(baseModels[slotIndex]);
+      baseModels[slotIndex] = m;
+      rebuildBatchedWeights();
+      document.getElementById('modelName' + slotIndex).textContent = name;
+      if (clearOnChange) clearCanvas();
+      statusEl.textContent = backendStatusPrefix() + ' | slot ' + labels[slotIndex] + ': ' + name;
+    } catch(err) {
+      alert('Parse error: ' + file.name + '\n' + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function clearCanvas() {
+  if (state) state.assign(tf.zeros([1, H, W, CH]));
+  stepCount = 0;
+}
+
+function setupDropZone(dropId, inputId, slotIndex) {
+  var drop = document.getElementById(dropId);
+  var input = document.getElementById(inputId);
+  drop.onclick = function() { input.click(); };
+  input.onchange = function(e) { if (e.target.files[0]) handleBaseModelFile(e.target.files[0], slotIndex); };
+  drop.ondragover = function(e) { e.preventDefault(); drop.classList.add('drag-over'); };
+  drop.ondragleave = function() { drop.classList.remove('drag-over'); };
+  drop.ondrop = function(e) {
+    e.preventDefault(); drop.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) handleBaseModelFile(e.dataTransfer.files[0], slotIndex);
+  };
+}
+
+for (var zi = 0; zi < BASE_MODELS; zi++) {
+  if (document.getElementById('dropModel' + zi)) {
+    setupDropZone('dropModel' + zi, 'fileModel' + zi, zi);
+  }
+}
+
+// ====== Brush model file handling ======
+function handleBrushModelFile(file) {
+  if (!file.name.endsWith('.npy')) { alert('Please use .npy files'); return; }
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var name = file.name.replace('.npy', '');
+      var m = loadModelFromNpy(e.target.result, name);
+      var color = brushColorByIndex(brushModels.length);
+      var bm = { id: nextBrushModelId++, name: name, model: m, color: color };
+      allocBrushMaskArrays(bm);
+      brushModels.push(bm);
+      selectedBrushModelId = bm.id;
+      rebuildBrushModelListUI();
+      buildPaletteTensor();
+      rebuildBatchedWeights();
+      brushStateDirty = true;
+      buildMaskTensor();
+      statusEl.textContent = backendStatusPrefix() + ' | brush model: ' + name + ' loaded';
+    } catch (err) {
+      alert('Parse error: ' + file.name + '\n' + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+(function setupBrushDropZone() {
+  var drop = document.getElementById('dropBrushModel');
+  var input = document.getElementById('fileBrushModel');
+  drop.onclick = function() { input.click(); };
+  input.onchange = function(e) {
+    if (!e.target.files || !e.target.files.length) return;
+    for (var i = 0; i < e.target.files.length; i++) handleBrushModelFile(e.target.files[i]);
+    input.value = '';
+  };
+  drop.ondragover = function(e) { e.preventDefault(); drop.classList.add('drag-over'); };
+  drop.ondragleave = function() { drop.classList.remove('drag-over'); };
+  drop.ondrop = function(e) {
+    e.preventDefault(); drop.classList.remove('drag-over');
+    if (!e.dataTransfer.files || !e.dataTransfer.files.length) return;
+    for (var i = 0; i < e.dataTransfer.files.length; i++) handleBrushModelFile(e.dataTransfer.files[i]);
+  };
+})();
+
+// ====== Brush painting ======
+function clientToGrid(clientX, clientY) {
+  var rect = canvas.getBoundingClientRect();
+  var gx = Math.floor((clientX - rect.left) / rect.width * W);
+  var gy = Math.floor((clientY - rect.top) / rect.height * H);
+  if (gx < 0) gx = 0; if (gx >= W) gx = W - 1;
+  if (gy < 0) gy = 0; if (gy >= H) gy = H - 1;
+  return [gx, gy];
+}
+function pseudoRand01(v) { var s = Math.sin(v) * 43758.5453123; return s - Math.floor(s); }
+
+function depositSprayPixel(bm, x, y, strength, strokeToken) {
+  if (!bm) return;
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  if (strength <= 0) return;
+  var idx = y * W + x;
+  var nextMask = bm.mask[idx] + strength;
+  if (nextMask > 1) nextMask = 1;
+  bm.mask[idx] = nextMask;
+  bm.life[idx] = -drawHoldLifeOffset;
+  bm.active = true;
+  var currentOwner = strokeModelMap[idx];
+  if (currentOwner === -1 || currentOwner === bm.id) {
+    strokeModelMap[idx] = bm.id;
+    strokeOrderMap[idx] = strokeToken;
+  } else {
+    var otherMask = 0;
+    for (var bi = 0; bi < brushModels.length; bi++) {
+      if (brushModels[bi].id === currentOwner) { otherMask = brushModels[bi].mask[idx]; break; }
+    }
+    if (nextMask > otherMask) {
+      strokeModelMap[idx] = bm.id;
+      strokeOrderMap[idx] = strokeToken;
+    }
+  }
+  bm.accum[idx] += strength * sprayWetGain;
+  if (bm.accum[idx] > sprayDripThreshold) {
+    var overflow = bm.accum[idx] - sprayDripThreshold;
+    bm.drip[idx] += overflow * sprayDripKick;
+    bm.dripWidth[idx] = Math.max(bm.dripWidth[idx], Math.max(sprayDripMinWidth, brushRadiusPx * 0.6));
+    if (bm.drip[idx] > 1.5) bm.drip[idx] = 1.5;
+    bm.accum[idx] = sprayDripThreshold * 0.7;
+  }
+}
+
+function fillCircleMask(bm, cx, cy, radius, strokeToken) {
+  var r = Math.max(0.5, radius);
+  var ri = Math.ceil(r);
+  var r2 = r * r;
+  var x0 = Math.max(0, Math.floor(cx - ri));
+  var x1 = Math.min(W - 1, Math.ceil(cx + ri));
+  var y0 = Math.max(0, Math.floor(cy - ri));
+  var y1 = Math.min(H - 1, Math.ceil(cy + ri));
+  var perPixel = 0.08 + 0.12 / Math.max(1, r);
+  for (var yy = y0; yy <= y1; yy++) {
+    for (var xx = x0; xx <= x1; xx++) {
+      var dx = xx - cx, dy = yy - cy;
+      if (dx * dx + dy * dy <= r2) depositSprayPixel(bm, xx, yy, perPixel, strokeToken);
+    }
+  }
+}
+
+function stampDisk(bm, cx, cy, erase, strokeToken) {
+  if (!bm) return;
+  var size = Math.max(1, brushRadiusPx);
+  var splatR = Math.max(size, spraySplatterRadius);
+  var outerR = splatR + size + 2;
+  var xMin = Math.max(0, Math.floor(cx - outerR));
+  var xMax = Math.min(W - 1, Math.ceil(cx + outerR));
+  var yMin = Math.max(0, Math.floor(cy - outerR));
+  var yMax = Math.min(H - 1, Math.ceil(cy + outerR));
+  if (erase) {
+    var er2 = (size + 2) * (size + 2);
+    for (var ey = yMin; ey <= yMax; ey++) {
+      for (var ex = xMin; ex <= xMax; ex++) {
+        var edx = ex - cx, edy = ey - cy;
+        if (edx * edx + edy * edy <= er2) {
+          var ei = ey * W + ex;
+          bm.mask[ei] = 0; bm.accum[ei] = 0; bm.drip[ei] = 0; bm.life[ei] = 1;
+          if (strokeModelMap[ei] === bm.id) {
+            strokeModelMap[ei] = -1;
+            strokeOrderMap[ei] = 0;
+          }
+        }
+      }
+    }
+    return;
+  }
+  fillCircleMask(bm, cx, cy, size, strokeToken);
+  var twoPi = Math.PI * 2;
+  for (var i = 0; i < spraySplatterAmount; i++) {
+    var angle = Math.random() * twoPi;
+    var rnd = Math.random();
+    var dx = rnd * Math.cos(angle) * splatR;
+    var dy = rnd * Math.sin(angle) * splatR;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    var s = 1 - dist / splatR;
+    var dotR = Math.max(0.5, size * s);
+    fillCircleMask(bm, cx + dx, cy + dy, dotR, strokeToken);
+  }
+}
+
+// ====== Brush evolution (drip propagation + heat-equation diffusion + life aging) ======
+function evolveSingleBrushMask(bm) {
+  if (!drawDecayEnabled) return false;
+  if (!bm.active) return false;
+  if (drawEvolveEveryNFrames > 1 && (renderFrame % drawEvolveEveryNFrames) !== 0) return false;
+
+  var changed = false;
+  if (bm.drip && bm.dripNext && bm.dripWidth && bm.dripWidthNext) {
+    bm.dripNext.fill(0);
+    bm.dripWidthNext.fill(0);
+    for (var sy = H - 2; sy >= 0; sy--) {
+      var srow = sy * W;
+      for (var sx = 0; sx < W; sx++) {
+        var si = srow + sx;
+        var charge = bm.drip[si];
+        if (charge <= 1e-4) continue;
+        var width = Math.max(sprayDripMinWidth, bm.dripWidth[si]);
+        var speedChance = Math.min(0.98, 0.28 + sprayDripSpeed * 1.6 + width * 0.08);
+        var moveRnd = pseudoRand01((si + 1) * 0.137 + renderFrame * 0.231);
+        if (moveRnd > speedChance) {
+          bm.dripNext[si] += charge * sprayDripKeep;
+          bm.dripWidthNext[si] = Math.max(bm.dripWidthNext[si], width);
+          continue;
+        }
+        var driftRnd = pseudoRand01((si + 1) * 0.17 + renderFrame * 0.11);
+        var driftX = 0;
+        if (driftRnd < sprayDripWobble * 0.5) driftX = -1;
+        else if (driftRnd > 1 - sprayDripWobble * 0.5) driftX = 1;
+        var tx = sx + driftX;
+        if (tx < 0) tx = 0;
+        if (tx >= W) tx = W - 1;
+        var ty = sy + 1;
+        var ti = ty * W + tx;
+        var transfer = Math.min(charge, 0.17 + width * 0.08);
+        if (transfer > 0) {
+          var core = transfer * 0.78;
+          var tail = transfer * sprayDripTail;
+          var side = transfer * Math.min(0.22, (width - sprayDripMinWidth) * 0.08);
+          var newMaskCenter = bm.mask[ti] + core;
+          if (newMaskCenter > 1) newMaskCenter = 1;
+          if (Math.abs(newMaskCenter - bm.mask[ti]) > 1e-6) changed = true;
+          bm.mask[ti] = newMaskCenter;
+          bm.mask[si] = Math.min(1, bm.mask[si] + tail);
+          if (tx > 0) { var li = ti - 1; bm.mask[li] = Math.min(1, bm.mask[li] + side); }
+          if (tx < W - 1) { var ri = ti + 1; bm.mask[ri] = Math.min(1, bm.mask[ri] + side); }
+          bm.accum[ti] += core * 0.6;
+          bm.life[ti] = Math.min(bm.life[ti], bm.life[si] - 0.01);
+          var dripOwner = strokeModelMap[ti];
+          if (dripOwner === -1 || dripOwner === bm.id) {
+            strokeModelMap[ti] = bm.id;
+            strokeOrderMap[ti] = Math.max(strokeOrderMap[ti], strokeOrderMap[si]);
+          } else {
+            var dripOtherMask = 0;
+            for (var obi = 0; obi < brushModels.length; obi++) {
+              if (brushModels[obi].id === dripOwner) { dripOtherMask = brushModels[obi].mask[ti]; break; }
+            }
+            if (newMaskCenter > dripOtherMask) {
+              strokeModelMap[ti] = bm.id;
+              strokeOrderMap[ti] = Math.max(strokeOrderMap[ti], strokeOrderMap[si]);
+            }
+          }
+          bm.active = true;
+        }
+        var remaining = Math.max(0, charge - transfer * 0.85);
+        if (remaining > 1e-4) {
+          bm.dripNext[ti] += remaining * sprayDripKeep;
+          bm.dripWidthNext[ti] = Math.max(
+            bm.dripWidthNext[ti],
+            Math.max(sprayDripMinWidth, width + (Math.floor(Math.random() * 3) - 1) * 0.25)
+          );
+        }
+        bm.dripNext[si] += charge * 0.03;
+        bm.dripWidthNext[si] = Math.max(bm.dripWidthNext[si], width * 0.92);
+      }
+    }
+    var dtmp = bm.drip; bm.drip = bm.dripNext; bm.dripNext = dtmp;
+    var wtmp = bm.dripWidth; bm.dripWidth = bm.dripWidthNext; bm.dripWidthNext = wtmp;
+  }
+
+  var avgLife = 0, activePx = 0;
+  for (var qi = 0; qi < W * H; qi++) {
+    if (bm.mask[qi] > DRAW_MASK_EPS) { avgLife += bm.life[qi]; activePx++; }
+  }
+  avgLife = activePx > 0 ? avgLife / activePx : 0;
+  var nPasses = 0;
+  if (avgLife >= 0) {
+    var avgEdgeEase = cubicBezier01(avgLife, drawEdgeBezierP1, drawEdgeBezierP2);
+    nPasses = 1 + Math.floor(avgEdgeEase * drawDiffusionPassesMax);
+  }
+  for (var pass = 0; pass < nPasses; pass++) {
+    for (var y = 0; y < H; y++) {
+      var row = y * W;
+      var rowUp = y > 0 ? row - W : row;
+      var rowDn = y < H - 1 ? row + W : row;
+      for (var x = 0; x < W; x++) {
+        var i = row + x;
+        var c = bm.mask[i];
+        var l = bm.mask[row + (x > 0 ? x - 1 : x)];
+        var r = bm.mask[row + (x < W - 1 ? x + 1 : x)];
+        var u = bm.mask[rowUp + x];
+        var dd = bm.mask[rowDn + x];
+        var avg = 0.25 * (l + r + u + dd);
+        var rate = avg >= c ? drawEdgeSoftenRate : drawEdgeSoftenRate * drawInwardErosionRatio;
+        var nv = c + rate * (avg - c);
+        if (nv < DRAW_MASK_EPS) nv = 0;
+        if (nv > 1) nv = 1;
+        bm.maskNext[i] = nv;
+        if (!changed && Math.abs(nv - c) > 1e-5) changed = true;
+      }
+    }
+    var tmp = bm.mask; bm.mask = bm.maskNext; bm.maskNext = tmp;
+  }
+
+  var anyActive = false;
+  var FADE_THRESHOLD = 0.08;
+  var maxClaim = 0;
+  for (var yi = 0; yi < H; yi++) {
+    for (var xi = 0; xi < W; xi++) {
+      var pi = yi * W + xi;
+      var nv2 = bm.mask[pi];
+      if (nv2 <= DRAW_MASK_EPS) { nv2 = 0; bm.mask[pi] = 0; }
+      var life = bm.life[pi];
+      if (nv2 > 0) {
+        if (life >= 1.0) {
+          var nl = 0, nc = 0;
+          if (xi > 0)     { var lf = bm.life[pi - 1]; if (lf < 1) { nl += lf; nc++; } }
+          if (xi < W - 1) { var lf2 = bm.life[pi + 1]; if (lf2 < 1) { nl += lf2; nc++; } }
+          if (yi > 0)     { var lf3 = bm.life[pi - W]; if (lf3 < 1) { nl += lf3; nc++; } }
+          if (yi < H - 1) { var lf4 = bm.life[pi + W]; if (lf4 < 1) { nl += lf4; nc++; } }
+          life = nc > 0 ? nl / nc : 0;
+        }
+        life += drawLifeProgressStep;
+        if (life >= 1) { life = 1; nv2 = 0; bm.mask[pi] = 0; }
+        else { anyActive = true; }
+        var se = cubicBezier01(life, drawStrengthBezierP1, drawStrengthBezierP2);
+        var eff = nv2 * (1.0 - se);
+        if (eff > maxClaim) maxClaim = eff;
+      } else {
+        life = 1;
+      }
+      if (nv2 > 0) {
+        if (strokeModelMap[pi] === -1 || strokeModelMap[pi] === bm.id) strokeModelMap[pi] = bm.id;
+      } else if (strokeModelMap[pi] === bm.id) {
+        strokeModelMap[pi] = -1;
+        strokeOrderMap[pi] = 0;
+      }
+      bm.life[pi] = life;
+    }
+  }
+  if (maxClaim < FADE_THRESHOLD) anyActive = false;
+  bm.active = anyActive;
+  if (!bm.active) {
+    bm.mask.fill(0); bm.maskNext.fill(0);
+    bm.accum.fill(0); bm.drip.fill(0); bm.dripNext.fill(0);
+    bm.dripWidth.fill(0); bm.dripWidthNext.fill(0);
+    bm.life.fill(1);
+    for (var ci = 0; ci < W * H; ci++) {
+      if (strokeModelMap[ci] === bm.id) { strokeModelMap[ci] = -1; strokeOrderMap[ci] = 0; }
+    }
+  }
+  return changed;
+}
+
+function evolveAllBrushMasks() {
+  var changed = false;
+  for (var i = 0; i < brushModels.length; i++) {
+    if (evolveSingleBrushMask(brushModels[i])) changed = true;
+  }
+  return changed;
+}
+
+function paintSegment(bm, g0, g1, erase, strokeToken) {
+  var x0 = g0[0], y0 = g0[1], x1 = g1[0], y1 = g1[1];
+  var dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0);
+  var sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  var err = dx - dy;
+  while (true) {
+    stampDisk(bm, x0, y0, erase, strokeToken);
+    if (x0 === x1 && y0 === y1) break;
+    var e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx) { err += dx; y0 += sy; }
+  }
+}
+
+function sprayWhilePressing() {
+  if (!isDrawingStroke || !drawOnCanvasEnabled) return false;
+  if (lastDrawGx < 0 || lastDrawGy < 0) return false;
+  var bm = getSelectedBrushModel();
+  if (!bm) return false;
+  strokeCounter++;
+  stampDisk(bm, lastDrawGx, lastDrawGy, activeStrokeErase, strokeCounter);
+  return true;
+}
+
+function setupCanvasDrawing() {
+  canvas.addEventListener('mousedown', function(e) {
+    if (!drawOnCanvasEnabled || e.button !== 0) return;
+    var bm = getSelectedBrushModel();
+    if (!bm) return;
+    e.preventDefault();
+    isDrawingStroke = true;
+    activeStrokeErase = !!e.shiftKey;
+    strokeCounter++;
+    var token = strokeCounter;
+    var g = clientToGrid(e.clientX, e.clientY);
+    stampDisk(bm, g[0], g[1], activeStrokeErase, token);
+    lastDrawGx = g[0]; lastDrawGy = g[1];
+    brushStateDirty = true;
+    buildMaskTensor();
+  });
+  window.addEventListener('mousemove', function(e) {
+    if (!isDrawingStroke || !drawOnCanvasEnabled) return;
+    var bm = getSelectedBrushModel();
+    if (!bm) return;
+    activeStrokeErase = !!e.shiftKey;
+    strokeCounter++;
+    var token = strokeCounter;
+    var g = clientToGrid(e.clientX, e.clientY);
+    if (lastDrawGx >= 0 && (lastDrawGx !== g[0] || lastDrawGy !== g[1])) {
+      paintSegment(bm, [lastDrawGx, lastDrawGy], g, activeStrokeErase, token);
+    } else {
+      stampDisk(bm, g[0], g[1], activeStrokeErase, token);
+    }
+    lastDrawGx = g[0]; lastDrawGy = g[1];
+    brushStateDirty = true;
+    buildMaskTensor();
+  });
+  window.addEventListener('mouseup', function() {
+    isDrawingStroke = false;
+    activeStrokeErase = false;
+    lastDrawGx = -1;
+    lastDrawGy = -1;
+  });
+}
+
+// ====== Controls ======
+document.getElementById('activeCheck').onchange = function(e) { isActive = e.target.checked; };
+document.getElementById('disturbCheck').onchange = function(e) { disturbance = e.target.checked; };
+document.getElementById('clearOnChangeCheck').onchange = function(e) { clearOnChange = e.target.checked; };
+document.getElementById('showMaskCheck').onchange = function(e) { showMask = e.target.checked; };
+document.getElementById('clearBtn').onclick = clearCanvas;
+document.getElementById('upscale2xBtn').onclick = upscaleSimulation2x;
+
+document.querySelectorAll('input[name=alignment]').forEach(function(r) {
+  r.onchange = function() {
+    alignment = parseInt(r.value);
+    buildDirectionMap();
+  };
+});
+document.getElementById('rotationRange').oninput = function(e) {
+  rotationAngle = parseFloat(e.target.value);
+  document.getElementById('rotationVal').textContent = rotationAngle;
+  buildDirectionMap();
+};
+document.getElementById('zoomRange').oninput = function(e) {
+  zoom = parseFloat(e.target.value);
+  document.getElementById('zoomVal').textContent = zoom;
+  updateCanvasSize();
+};
+document.getElementById('speedRange').oninput = function(e) {
+  stepsPerFrame = parseInt(e.target.value);
+  document.getElementById('speedVal').textContent = stepsPerFrame;
+};
+document.getElementById('noiseScaleRange').oninput = function(e) {
+  noiseScale = parseFloat(e.target.value);
+  document.getElementById('noiseScaleVal').textContent = noiseScale.toFixed(2);
+  buildMaskTensor();
+};
+document.getElementById('noiseOctavesRange').oninput = function(e) {
+  noiseOctaves = parseInt(e.target.value, 10) / 100;
+  document.getElementById('noiseOctavesVal').textContent = noiseOctaves.toFixed(2);
+  buildMaskTensor();
+};
+document.getElementById('maskCutoffRange').oninput = function(e) {
+  maskThreshold = parseInt(e.target.value, 10) / 100;
+  document.getElementById('maskCutoffVal').textContent = maskThreshold.toFixed(2);
+  buildMaskTensor();
+};
+document.getElementById('maskEdgeRange').oninput = function(e) {
+  maskEdgeSharpness = parseInt(e.target.value, 10);
+  document.getElementById('maskEdgeVal').textContent = String(maskEdgeSharpness);
+  buildMaskTensor();
+};
+document.getElementById('layerFreqRange').oninput = function(e) {
+  layerFreqSpread = parseInt(e.target.value, 10) / 100;
+  document.getElementById('layerFreqVal').textContent = layerFreqSpread.toFixed(2);
+  buildMaskTensor();
+};
+document.getElementById('noiseAnimateCheck').onchange = function(e) {
+  noiseAnimate = e.target.checked;
+};
+document.getElementById('reseedNoiseBtn').onclick = function() {
+  noiseSeedOffset = [Math.random() * 1000, Math.random() * 1000, Math.random() * 1000];
+  noiseTime = 0;
+  buildMaskTensor();
+};
+document.getElementById('noiseTimeSpeedRange').oninput = function(e) {
+  noiseTimeSpeed = parseInt(e.target.value, 10) / 4000;
+  document.getElementById('noiseTimeSpeedVal').textContent = noiseTimeSpeed.toFixed(3);
+};
+document.getElementById('noiseZScaleRange').oninput = function(e) {
+  noiseZScale = parseInt(e.target.value, 10) / 100;
+  document.getElementById('noiseZScaleVal').textContent = noiseZScale.toFixed(2);
+  buildMaskTensor();
+};
+
+// ====== Brush controls ======
+document.getElementById('brushRange').oninput = function(e) {
+  brushRadiusPx = parseInt(e.target.value, 10);
+  document.getElementById('brushVal').textContent = String(brushRadiusPx);
+};
+document.getElementById('spraySplatterAmountRange').oninput = function(e) {
+  spraySplatterAmount = parseInt(e.target.value, 10);
+  document.getElementById('spraySplatterAmountVal').textContent = String(spraySplatterAmount);
+};
+document.getElementById('spraySplatterRadiusRange').oninput = function(e) {
+  spraySplatterRadius = parseInt(e.target.value, 10);
+  document.getElementById('spraySplatterRadiusVal').textContent = String(spraySplatterRadius);
+};
+document.getElementById('sprayDripThresholdRange').oninput = function(e) {
+  sprayDripThreshold = parseInt(e.target.value, 10) / 100;
+  document.getElementById('sprayDripThresholdVal').textContent = sprayDripThreshold.toFixed(2);
+};
+document.getElementById('sprayDripSpeedRange').oninput = function(e) {
+  sprayDripSpeed = parseInt(e.target.value, 10) / 100;
+  document.getElementById('sprayDripSpeedVal').textContent = sprayDripSpeed.toFixed(2);
+};
+document.getElementById('drawModeCheck').onchange = function(e) {
+  drawOnCanvasEnabled = e.target.checked;
+};
+document.getElementById('drawDecayCheck').onchange = function(e) {
+  drawDecayEnabled = e.target.checked;
+  if (drawDecayEnabled) {
+    brushModels.forEach(function(bm) {
+      var hasMask = false;
+      for (var i = 0; i < W * H; i++) {
+        if (bm.mask[i] > DRAW_MASK_EPS) { bm.life[i] = -drawHoldLifeOffset; hasMask = true; }
+        else { bm.life[i] = 1; }
+      }
+      bm.active = hasMask;
+    });
+  }
+  brushStateDirty = true;
+  buildMaskTensor();
+};
+document.getElementById('clearDrawMaskBtn').onclick = function() {
+  var bm = getSelectedBrushModel();
+  if (!bm) return;
+  bm.mask.fill(0); bm.maskNext.fill(0);
+  bm.accum.fill(0);
+  bm.drip.fill(0); bm.dripNext.fill(0);
+  bm.dripWidth.fill(0); bm.dripWidthNext.fill(0);
+  bm.life.fill(1); bm.lifeNext.fill(1);
+  bm.active = false;
+  for (var i = 0; i < W * H; i++) {
+    if (strokeModelMap[i] === bm.id) { strokeModelMap[i] = -1; strokeOrderMap[i] = 0; }
+  }
+  brushStateDirty = true;
+  buildMaskTensor();
+};
+
+rebuildBrushModelListUI();
+setupCanvasDrawing();
+initTF();
+</script>
+</body>
+</html>
