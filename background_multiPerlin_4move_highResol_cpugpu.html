@@ -62,28 +62,11 @@
     width: 100%;
   }
   .canvas-sim-column #canvas,
-  .canvas-sim-column #noisePreview,
-  .canvas-sim-column #mainCanvasWrap {
+  .canvas-sim-column #noisePreview {
     display: block;
     flex-shrink: 0;
     margin-left: auto;
     margin-right: auto;
-  }
-  #mainCanvasWrap { position: relative; }
-  #mainCanvasWrap.fs-active {
-    position: fixed;
-    inset: 0;
-    z-index: 9999;
-    background: #000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  #mainCanvasWrap.fs-active canvas {
-    border-radius: 0;
-    image-rendering: -moz-crisp-edges;
-    image-rendering: crisp-edges;
-    image-rendering: pixelated;
   }
   canvas { border: 1px solid #333; border-radius: 8px; cursor: crosshair;
            image-rendering: pixelated; background: #000; }
@@ -242,21 +225,17 @@
         <button class="btn" id="reseedNoiseBtn" type="button">New noise seed</button>
         <button class="btn" id="clearBtn">Clear Canvas</button>
         <button class="btn" id="upscale2xBtn" type="button">Upscale ×2</button>
-        <button class="btn" id="fullscreen1080pBtn" type="button">Fullscreen 1920×1080</button>
       </div>
     </div>
   </div>
 
   <div class="canvas-area">
     <div class="canvas-sim-column">
-      <div id="mainCanvasWrap">
-        <canvas id="canvas"></canvas>
-      </div>
+      <canvas id="canvas"></canvas>
       <div id="info" class="sim-meta"></div>
       <div class="help sim-meta">
         <strong>Scheme 2</strong>: four Perlin fields for A–D as before. Right panel supports multiple brush models (E/F/G...):
         select one and <strong>drag on canvas</strong> to paint its mask on top of D (Shift = erase).
-        Fullscreen: integer pixel scale (e.g. 384×216 → 4× on 1536×864). <strong>Esc</strong> exits.
       </div>
       <div class="preview-block">
         <div class="preview-label">
@@ -322,7 +301,8 @@
   </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js"></script>
 <script>
 "use strict";
 
@@ -351,7 +331,7 @@ var CH = 12;         // texture NCA channels
 var FILTER_N = 4;    // identity, sobel_x, sobel_y, laplacian
 var PERCEPTION_N = CH * FILTER_N;  // 48
 /** Logical grid size (buffers + TF tensors). After changing W or H, call initCanvas() to rebuild. */
-var W = 480, H = 270;
+var W = 384, H = 216;
 
 /**
  * Perlin sample coordinates use one reference span for both axes so blobs are not “squashed” when W≠H.
@@ -458,65 +438,27 @@ var backendNote = '';
 
 var statusEl = document.getElementById('status');
 var infoEl = document.getElementById('info');
-var mainCanvasWrap = document.getElementById('mainCanvasWrap');
 var canvas = document.getElementById('canvas');
-var ctx = canvas.getContext('2d');
+// ctx + render path decided in initTF after backend picked.
+// webgpu → tf.browser.draw (zero-readback). webgl/cpu → async data() + putImageData.
+var ctx = null;
+var useDrawKernel = false;
+var pendingReadPromise = null;
+var lastPixelData = null;
+var lastPixelDims = { W: 0, H: 0 };
+var tintTensor = null;
+var tintDirty = true;
+// Perf counters (finer than fpsSmoothed): FPS = rAF rate, Cps = canvas updates/s, Sps = ncaStep/s
+var perfFrameCount = 0;
+var perfStepCount = 0;
+var perfContentCount = 0;
+var perfLastSampleTime = 0;
+var perfFps = 0, perfSps = 0, perfCps = 0;
+// Catmull-Rom spline history for smooth brush strokes
+var strokeHistory = [];
 var noisePreviewCanvas = document.getElementById('noisePreview');
 var noisePreviewCtx = noisePreviewCanvas.getContext('2d');
 strokeModelMap.fill(-1);
-
-function isMainCanvasFullscreen() {
-  if (!mainCanvasWrap) mainCanvasWrap = document.getElementById('mainCanvasWrap');
-  var fsEl = document.fullscreenElement || document.webkitFullscreenElement ||
-    document.mozFullScreenElement || document.msFullscreenElement;
-  return fsEl === mainCanvasWrap;
-}
-
-/**
- * Fullscreen: integer nearest-neighbor scale — each buffer pixel is k×k CSS pixels (no blur).
- * k = floor(min(vw/W, vh/H)), e.g. 384×216 on 1536×864 → k=4.
- */
-function applyFullscreenPixelLayout() {
-  var vw = window.innerWidth;
-  var vh = window.innerHeight;
-  var kW = Math.floor(vw / W);
-  var kH = Math.floor(vh / H);
-  var k = Math.min(kW, kH);
-  if (k < 1) k = 1;
-  canvas.style.width = (W * k) + 'px';
-  canvas.style.height = (H * k) + 'px';
-  canvas.style.imageRendering = 'pixelated';
-  canvas.style.setProperty('-webkit-image-rendering', 'pixelated');
-}
-
-function onFullscreenChange() {
-  if (!mainCanvasWrap) mainCanvasWrap = document.getElementById('mainCanvasWrap');
-  var fsEl = document.fullscreenElement || document.webkitFullscreenElement ||
-    document.mozFullScreenElement || document.msFullscreenElement;
-  if (fsEl === mainCanvasWrap) {
-    mainCanvasWrap.classList.add('fs-active');
-    applyFullscreenPixelLayout();
-  } else {
-    if (mainCanvasWrap) mainCanvasWrap.classList.remove('fs-active');
-    canvas.style.imageRendering = '';
-    canvas.style.removeProperty('-webkit-image-rendering');
-    updateCanvasSize();
-  }
-}
-
-function enterFullscreen1080() {
-  if (!mainCanvasWrap) mainCanvasWrap = document.getElementById('mainCanvasWrap');
-  var wrap = mainCanvasWrap;
-  var req = wrap.requestFullscreen || wrap.webkitRequestFullscreen || wrap.mozRequestFullScreen || wrap.msRequestFullscreen;
-  if (!req) {
-    alert('Fullscreen is not supported in this browser.');
-    return;
-  }
-  var p = req.call(wrap);
-  if (p && typeof p.then === 'function') {
-    p.catch(function() { alert('Could not enter fullscreen (user denied or blocked).'); });
-  }
-}
 
 function backendStatusPrefix() {
   var label = 'Backend: ' + backendName;
@@ -1227,6 +1169,7 @@ function buildMaskTensor() {
     }
   }
   quartileMaskTensor = tf.tensor4d(data, [1, H, W, total]);
+  tintDirty = true;
   noisePreviewCanvas.width = W;
   noisePreviewCanvas.height = H;
   noisePreviewCtx.putImageData(new ImageData(imgBuf, W, H), 0, 0);
@@ -1240,11 +1183,6 @@ function buildMaskTensor() {
 function syncBothCanvasCssSizes() {
   var dw = Math.max(1, Math.round(W * zoom));
   var dh = Math.max(1, Math.round(H * zoom));
-  if (isMainCanvasFullscreen()) {
-    noisePreviewCanvas.style.width = dw + 'px';
-    noisePreviewCanvas.style.height = dh + 'px';
-    return;
-  }
   canvas.style.width = dw + 'px';
   canvas.style.height = dh + 'px';
   noisePreviewCanvas.style.width = dw + 'px';
@@ -1257,9 +1195,10 @@ function updateNoisePreviewZoom() {
 
 // ====== Init ======
 async function initTF() {
+  var supportsWebGpuApi = typeof navigator !== 'undefined' && !!navigator.gpu;
+  var backendOrder = supportsWebGpuApi ? ['webgpu', 'webgl', 'cpu'] : ['webgl', 'cpu'];
   var selected = null;
   var errors = [];
-  var backendOrder = ['webgl', 'cpu'];
   for (var i = 0; i < backendOrder.length; i++) {
     var candidate = backendOrder[i];
     try {
@@ -1275,13 +1214,28 @@ async function initTF() {
     throw new Error('No TF backend available. ' + errors.join(' | '));
   }
   backendName = selected;
-  backendNote = selected === 'webgl' ? 'WebGL mode' : 'WebGL unavailable, CPU fallback';
+  useDrawKernel = (selected === 'webgpu');
+  if (!useDrawKernel) {
+    // webgl/cpu path uses 2D canvas for putImageData.
+    ctx = canvas.getContext('2d');
+  }
+  if (selected === 'webgpu') {
+    backendNote = 'zero-readback';
+  } else if (!supportsWebGpuApi) {
+    backendNote = 'WebGPU API unavailable | async readback';
+  } else {
+    backendNote = 'WebGPU fallback | async readback';
+  }
   statusEl.textContent = backendStatusPrefix();
   initCanvas();
 }
 
 function initCanvas() {
   if (state) state.dispose();
+  if (tintTensor) { tintTensor.dispose(); tintTensor = null; }
+  tintDirty = true;
+  lastPixelData = null;
+  lastPixelDims.W = 0; lastPixelDims.H = 0;
   disposePerlinGpu();
   cachedNoise01 = new Float32Array(W * H);
   cachedQuartile = new Uint8Array(W * H);
@@ -1305,6 +1259,7 @@ function initCanvas() {
     bm.life.fill(1);
     bm.lifeNext.fill(1);
     bm.active = false;
+    bm.bboxX0 = W; bm.bboxY0 = H; bm.bboxX1 = -1; bm.bboxY1 = -1;
   });
   state = tf.variable(tf.zeros([1, H, W, CH]));
   buildPerceptionKernel();
@@ -1394,6 +1349,8 @@ function upscaleSimulation2x() {
       bm.life = resizeFloat32Bilinear(bm.life, oldW, oldH, newW, newH);
       bm.lifeNext = new Float32Array(newW * newH);
       bm.active = bm.active && bm.mask.some(function(v) { return v > DRAW_MASK_EPS; });
+      // Invalidate bbox — will be refreshed on next evolve scan.
+      bm.bboxX0 = 0; bm.bboxY0 = 0; bm.bboxX1 = newW - 1; bm.bboxY1 = newH - 1;
     });
     var resizedState = state ? tf.tidy(function() {
       return tf.image.resizeBilinear(state, [newH, newW], true);
@@ -1409,6 +1366,10 @@ function upscaleSimulation2x() {
     cachedMixR = new Float32Array(W * H);
     cachedMixG = new Float32Array(W * H);
     cachedMixB = new Float32Array(W * H);
+    if (tintTensor) { tintTensor.dispose(); tintTensor = null; }
+    tintDirty = true;
+    lastPixelData = null;
+    lastPixelDims.W = 0; lastPixelDims.H = 0;
     state = tf.variable(resizedState);
     resizedState.dispose();
 
@@ -1455,6 +1416,10 @@ function depositSprayPixel(bm, x, y, strength, strokeToken) {
   bm.mask[idx] = nextMask;
   bm.life[idx] = -drawHoldLifeOffset;
   bm.active = true;
+  if (x < bm.bboxX0) bm.bboxX0 = x;
+  if (x > bm.bboxX1) bm.bboxX1 = x;
+  if (y < bm.bboxY0) bm.bboxY0 = y;
+  if (y > bm.bboxY1) bm.bboxY1 = y;
   var currentOwner = strokeModelMap[idx];
   if (currentOwner === -1 || currentOwner === bm.id) {
     strokeModelMap[idx] = bm.id;
@@ -1554,13 +1519,30 @@ function evolveSingleBrushMask(bm) {
   if (!bm.active) return false;
   if (drawEvolveEveryNFrames > 1 && (renderFrame % drawEvolveEveryNFrames) !== 0) return false;
 
+  // Bbox iteration window. Margin 2: drip can propagate down-and-side 1px, diffusion ±1.
+  var bx0 = Math.max(0, bm.bboxX0 - 2);
+  var by0 = Math.max(0, bm.bboxY0 - 2);
+  var bx1 = Math.min(W - 1, bm.bboxX1 + 2);
+  var by1 = Math.min(H - 1, bm.bboxY1 + 2);
+  if (bx1 < bx0 || by1 < by0) return false;
+
   var changed = false;
   if (bm.drip && bm.dripNext && bm.dripWidth && bm.dripWidthNext) {
-    bm.dripNext.fill(0);
-    bm.dripWidthNext.fill(0);
-    for (var sy = H - 2; sy >= 0; sy--) {
+    // Zero within bbox+margin (drip targets ti = sy+1, tx ± 1). Outside: invariant 0.
+    var zy0 = Math.max(0, by0 - 1);
+    var zy1 = Math.min(H - 1, by1 + 1);
+    var zx0 = Math.max(0, bx0 - 1);
+    var zx1 = Math.min(W - 1, bx1 + 1);
+    for (var zy = zy0; zy <= zy1; zy++) {
+      var zr = zy * W;
+      for (var zx = zx0; zx <= zx1; zx++) {
+        bm.dripNext[zr + zx] = 0;
+        bm.dripWidthNext[zr + zx] = 0;
+      }
+    }
+    for (var sy = Math.min(by1, H - 2); sy >= by0; sy--) {
       var srow = sy * W;
-      for (var sx = 0; sx < W; sx++) {
+      for (var sx = bx0; sx <= bx1; sx++) {
         var si = srow + sx;
         var charge = bm.drip[si];
         if (charge <= 1e-4) continue;
@@ -1641,8 +1623,12 @@ function evolveSingleBrushMask(bm) {
   }
 
   var avgLife = 0, activePx = 0;
-  for (var qi = 0; qi < W * H; qi++) {
-    if (bm.mask[qi] > DRAW_MASK_EPS) { avgLife += bm.life[qi]; activePx++; }
+  for (var qy = by0; qy <= by1; qy++) {
+    var qrow = qy * W;
+    for (var qx = bx0; qx <= bx1; qx++) {
+      var qi = qrow + qx;
+      if (bm.mask[qi] > DRAW_MASK_EPS) { avgLife += bm.life[qi]; activePx++; }
+    }
   }
   avgLife = activePx > 0 ? avgLife / activePx : 0;
   var nPasses = 0;
@@ -1652,11 +1638,24 @@ function evolveSingleBrushMask(bm) {
   }
 
   for (var pass = 0; pass < nPasses; pass++) {
-    for (var y = 0; y < H; y++) {
+    // Copy untouched (outside bbox) mask region to maskNext — only seam rows if needed.
+    // Since we only read within [bx0..bx1]×[by0..by1], the swap below would set outside
+    // pixels to stale values. So we clear maskNext first along bbox strip and copy neighbors.
+    // Simpler: ensure pixels outside bbox in maskNext mirror mask exactly.
+    for (var yy = by0; yy <= by1; yy++) {
+      var rowS = yy * W;
+      // Copy left/right seams so subsequent bbox access to maskNext[row + bx0-1] stays valid.
+      // Actually we read only mask[], write only maskNext[] in bbox. After swap, outside bbox
+      // pixels of the new 'mask' = old 'maskNext' which was stale. So pre-copy whole rows in bbox.
+      for (var xx = 0; xx < W; xx++) {
+        bm.maskNext[rowS + xx] = bm.mask[rowS + xx];
+      }
+    }
+    for (var y = by0; y <= by1; y++) {
       var row = y * W;
       var rowUp = y > 0 ? row - W : row;
       var rowDn = y < H - 1 ? row + W : row;
-      for (var x = 0; x < W; x++) {
+      for (var x = bx0; x <= bx1; x++) {
         var i = row + x;
         var c = bm.mask[i];
         var l = bm.mask[row + (x > 0 ? x - 1 : x)];
@@ -1678,8 +1677,9 @@ function evolveSingleBrushMask(bm) {
   var anyActive = false;
   var FADE_THRESHOLD = 0.08;
   var maxClaim = 0;
-  for (var yi = 0; yi < H; yi++) {
-    for (var xi = 0; xi < W; xi++) {
+  var newX0 = W, newY0 = H, newX1 = -1, newY1 = -1;
+  for (var yi = by0; yi <= by1; yi++) {
+    for (var xi = bx0; xi <= bx1; xi++) {
       var pi = yi * W + xi;
       var nv2 = bm.mask[pi];
       if (nv2 <= DRAW_MASK_EPS) { nv2 = 0; bm.mask[pi] = 0; }
@@ -1709,6 +1709,10 @@ function evolveSingleBrushMask(bm) {
         if (strokeModelMap[pi] === -1 || strokeModelMap[pi] === bm.id) {
           strokeModelMap[pi] = bm.id;
         }
+        if (xi < newX0) newX0 = xi;
+        if (xi > newX1) newX1 = xi;
+        if (yi < newY0) newY0 = yi;
+        if (yi > newY1) newY1 = yi;
       } else if (strokeModelMap[pi] === bm.id) {
         strokeModelMap[pi] = -1;
         strokeOrderMap[pi] = 0;
@@ -1720,7 +1724,12 @@ function evolveSingleBrushMask(bm) {
   if (maxClaim < FADE_THRESHOLD) anyActive = false;
 
   bm.active = anyActive;
+  if (bm.active && newX1 >= newX0) {
+    bm.bboxX0 = newX0; bm.bboxY0 = newY0;
+    bm.bboxX1 = newX1; bm.bboxY1 = newY1;
+  }
   if (!bm.active) {
+    bm.bboxX0 = W; bm.bboxY0 = H; bm.bboxX1 = -1; bm.bboxY1 = -1;
     bm.mask.fill(0);
     bm.maskNext.fill(0);
     bm.accum.fill(0);
@@ -1771,6 +1780,36 @@ function sprayWhilePressing() {
   return true;
 }
 
+// Catmull-Rom spline interpolation. Returns 2D point at t in [0,1] through p1,p2 with p0,p3 controls.
+function catmullRom(p0, p1, p2, p3, t) {
+  var t2 = t * t, t3 = t2 * t;
+  var x = 0.5 * ((2 * p1[0]) +
+    (-p0[0] + p2[0]) * t +
+    (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 +
+    (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3);
+  var y = 0.5 * ((2 * p1[1]) +
+    (-p0[1] + p2[1]) * t +
+    (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+    (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3);
+  return [Math.round(x), Math.round(y)];
+}
+
+// Paint Catmull-Rom segment between p1,p2 using p0,p3 as tangent controls.
+function paintSplineSegment(bm, p0, p1, p2, p3, erase, strokeToken) {
+  var dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+  var chord = Math.sqrt(dx * dx + dy * dy);
+  var steps = Math.max(1, Math.ceil(chord * 1.5));
+  var prev = p1;
+  for (var s = 1; s <= steps; s++) {
+    var t = s / steps;
+    var pt = catmullRom(p0, p1, p2, p3, t);
+    if (pt[0] !== prev[0] || pt[1] !== prev[1]) {
+      paintSegment(bm, prev, pt, erase, strokeToken);
+    }
+    prev = pt;
+  }
+}
+
 function setupCanvasDrawing() {
   canvas.addEventListener('mousedown', function(e) {
     if (!drawOnCanvasEnabled || e.button !== 0) return;
@@ -1785,7 +1824,8 @@ function setupCanvasDrawing() {
     stampDisk(bm, g[0], g[1], activeStrokeErase, token);
     lastDrawGx = g[0];
     lastDrawGy = g[1];
-    buildMaskTensor();
+    strokeHistory = [[g[0], g[1]]];
+    // No buildMaskTensor here — render loop handles via needRebuildMask on stroke.
   });
   window.addEventListener('mousemove', function(e) {
     if (!isDrawingStroke || !drawOnCanvasEnabled) return;
@@ -1796,19 +1836,43 @@ function setupCanvasDrawing() {
     var token = strokeCounter;
     var g = clientToGrid(e.clientX, e.clientY);
     if (lastDrawGx >= 0 && (lastDrawGx !== g[0] || lastDrawGy !== g[1])) {
-      paintSegment(bm, [lastDrawGx, lastDrawGy], g, activeStrokeErase, token);
+      strokeHistory.push([g[0], g[1]]);
+      var n = strokeHistory.length;
+      if (n >= 4) {
+        // Spline through strokeHistory[n-3], n-2 with n-4 and n-1 as controls.
+        paintSplineSegment(bm,
+          strokeHistory[n - 4], strokeHistory[n - 3],
+          strokeHistory[n - 2], strokeHistory[n - 1],
+          activeStrokeErase, token);
+      } else {
+        // Not enough history → straight Bresenham.
+        paintSegment(bm, [lastDrawGx, lastDrawGy], g, activeStrokeErase, token);
+      }
+      // Keep history bounded.
+      if (strokeHistory.length > 16) strokeHistory.splice(0, strokeHistory.length - 16);
     } else {
       stampDisk(bm, g[0], g[1], activeStrokeErase, token);
     }
     lastDrawGx = g[0];
     lastDrawGy = g[1];
-    buildMaskTensor();
   });
   window.addEventListener('mouseup', function() {
+    if (isDrawingStroke && strokeHistory.length >= 2) {
+      // Flush remaining tail spline with duplicated end control.
+      var bm = getSelectedBrushModel();
+      var n = strokeHistory.length;
+      if (bm && n >= 3) {
+        paintSplineSegment(bm,
+          strokeHistory[n - 3], strokeHistory[n - 2],
+          strokeHistory[n - 1], strokeHistory[n - 1],
+          activeStrokeErase, strokeCounter);
+      }
+    }
     isDrawingStroke = false;
     activeStrokeErase = false;
     lastDrawGx = -1;
     lastDrawGy = -1;
+    strokeHistory = [];
   });
 }
 
@@ -1948,7 +2012,13 @@ function ncaStep() {
     }
     for (var bi = 0; bi < brushModels.length; bi++) {
       var bm = brushModels[bi];
-      dxList.push(bm.model ? computeDx(perceived, bm.model) : zeroDx);
+      // Skip inactive brushes: no mask, no stroke in progress. Still occupies dxList slot
+      // (zeroDx) to keep qm channel indices aligned with buildMaskTensor.
+      if (!bm.model || (!bm.active && !isDrawingStroke)) {
+        dxList.push(zeroDx);
+      } else {
+        dxList.push(computeDx(perceived, bm.model));
+      }
     }
     var qm = quartileMaskTensor;
     var combinedDx = tf.mul(dxList[0], qm.slice([0, 0, 0, 0], [-1, -1, -1, 1]));
@@ -2041,40 +2111,105 @@ function render(ts) {
       if (disturbance) applyDisturbance();
       ncaStep();
       stepCount++;
+      perfStepCount++;
     }
   }
 
+  perfFrameCount++;
+
   var shouldDisplayFrame = (renderFrame % displayEveryNFrames) === 0;
   if (state && shouldDisplayFrame) {
-    tf.tidy(function() {
-      // Texture NCA visualization: rgb = state[:,:,:3] / 2 + 0.5
-      var rgb = tf.add(state.slice([0,0,0,0], [1,H,W,3]).mul(0.5), 0.5);
-      var vis = tf.clipByValue(rgb, 0, 1).mul(255);
-      var data = vis.dataSync();
-      var imgData = new ImageData(W, H);
-      for (var i = 0; i < W * H; i++) {
-        imgData.data[i*4+0] = data[i*3+0];
-        imgData.data[i*4+1] = data[i*3+1];
-        imgData.data[i*4+2] = data[i*3+2];
-        imgData.data[i*4+3] = 255;
+    // Rebuild tintTensor on GPU from cached mix colors when needed + dirty.
+    if (showMask && tintDirty) {
+      if (tintTensor) { tintTensor.dispose(); tintTensor = null; }
+      var tintData = new Float32Array(W * H * 3);
+      for (var ti = 0; ti < W * H; ti++) {
+        tintData[ti * 3]     = cachedMixR[ti] / 255;
+        tintData[ti * 3 + 1] = cachedMixG[ti] / 255;
+        tintData[ti * 3 + 2] = cachedMixB[ti] / 255;
       }
+      tintTensor = tf.tensor3d(tintData, [H, W, 3]);
+      tintDirty = false;
+    }
 
-      // Blend overlay (weighted A–E tint, matches preview)
-      if (showMask) {
-        for (var y = 0; y < H; y++) {
-          for (var x = 0; x < W; x++) {
-            var j3 = y * W + x;
-            var a = 0.24;
-            var rr = cachedMixR[j3], gg = cachedMixG[j3], bb = cachedMixB[j3];
-            imgData.data[j3*4+0] = Math.round(imgData.data[j3*4+0] * (1-a) + rr * a);
-            imgData.data[j3*4+1] = Math.round(imgData.data[j3*4+1] * (1-a) + gg * a);
-            imgData.data[j3*4+2] = Math.round(imgData.data[j3*4+2] * (1-a) + bb * a);
-          }
+    if (useDrawKernel) {
+      // WebGPU zero-readback: compose [H,W,3] 0..1 → tf.browser.draw straight to canvas.
+      var displayTensor = tf.tidy(function() {
+        var rgb = state.slice([0,0,0,0], [1,H,W,3]).reshape([H,W,3]).mul(0.5).add(0.5);
+        var clipped = tf.clipByValue(rgb, 0, 1);
+        if (showMask && tintTensor) {
+          return tf.clipByValue(clipped.mul(0.76).add(tintTensor.mul(0.24)), 0, 1);
+        }
+        return clipped;
+      });
+      try {
+        tf.browser.draw(displayTensor, canvas);
+        perfContentCount++;
+      } catch (e) {
+        if (!window.__drawFallbackWarned) {
+          console.warn('tf.browser.draw failed, falling back to readback:', e.message);
+          window.__drawFallbackWarned = true;
+          useDrawKernel = false;
+          if (!ctx) ctx = canvas.getContext('2d');
         }
       }
+      displayTensor.dispose();
+    } else {
+      // Async readback path. While in-flight, keep blitting lastPixelData (1-frame old).
+      if (!pendingReadPromise) {
+        var pixelTensor = tf.tidy(function() {
+          var rgb = state.slice([0,0,0,0], [1,H,W,3]).reshape([H,W,3]).mul(0.5).add(0.5);
+          var clipped = tf.clipByValue(rgb, 0, 1);
+          var mixed = (showMask && tintTensor)
+            ? tf.clipByValue(clipped.mul(0.76).add(tintTensor.mul(0.24)), 0, 1)
+            : clipped;
+          return mixed.mul(255).cast('int32');
+        });
+        var reqW = W, reqH = H;
+        pendingReadPromise = pixelTensor.data().then(function(rgbData) {
+          pixelTensor.dispose();
+          pendingReadPromise = null;
+          if (reqW !== W || reqH !== H) return;
+          var n = reqW * reqH;
+          if (!lastPixelData || lastPixelData.length !== n * 4) {
+            lastPixelData = new Uint8ClampedArray(n * 4);
+          }
+          for (var pi = 0; pi < n; pi++) {
+            lastPixelData[pi*4]     = rgbData[pi*3];
+            lastPixelData[pi*4 + 1] = rgbData[pi*3 + 1];
+            lastPixelData[pi*4 + 2] = rgbData[pi*3 + 2];
+            lastPixelData[pi*4 + 3] = 255;
+          }
+          lastPixelDims.W = reqW;
+          lastPixelDims.H = reqH;
+        }).catch(function(e) {
+          pixelTensor.dispose();
+          pendingReadPromise = null;
+          if (!window.__readbackWarned) {
+            console.warn('async readback failed:', e.message);
+            window.__readbackWarned = true;
+          }
+        });
+      }
+      if (ctx && lastPixelData && lastPixelDims.W === W && lastPixelDims.H === H) {
+        ctx.putImageData(new ImageData(lastPixelData, W, H), 0, 0);
+        perfContentCount++;
+      }
+    }
+  }
 
-      ctx.putImageData(imgData, 0, 0);
-    });
+  // Sample FPS + steps/sec + content/sec every 500ms
+  var nowMs = performance.now();
+  if (perfLastSampleTime === 0) perfLastSampleTime = nowMs;
+  var pElapsed = nowMs - perfLastSampleTime;
+  if (pElapsed >= 500) {
+    perfFps = (perfFrameCount * 1000 / pElapsed);
+    perfSps = (perfStepCount * 1000 / pElapsed);
+    perfCps = (perfContentCount * 1000 / pElapsed);
+    perfFrameCount = 0;
+    perfStepCount = 0;
+    perfContentCount = 0;
+    perfLastSampleTime = nowMs;
   }
 
   if ((renderFrame % infoEveryNFrames) === 0) {
@@ -2085,8 +2220,11 @@ function render(ts) {
     for (var bi = 0; bi < brushModels.length; bi++) {
       names.push(brushModels[bi].name);
     }
-    infoEl.textContent = 'FPS: ' + fpsSmoothed.toFixed(1) + ' (now ' + fpsInstant.toFixed(1) + ')' +
-      ' | Steps: ' + stepCount + ' | Tensors: ' + tf.memory().numTensors +
+    infoEl.textContent = 'FPS: ' + perfFps.toFixed(1) +
+      ' | Content: ' + perfCps.toFixed(1) + '/s' +
+      ' | Steps/s: ' + perfSps.toFixed(1) +
+      ' | Steps: ' + stepCount +
+      ' | Tensors: ' + tf.memory().numTensors +
       ' | A-D + Brush: ' + names.join(', ');
   }
   animId = requestAnimationFrame(render);
@@ -2140,7 +2278,8 @@ function handleBrushModelFile(file) {
         dripWidthNext: new Float32Array(W * H),
         life: new Float32Array(W * H),
         lifeNext: new Float32Array(W * H),
-        active: false
+        active: false,
+        bboxX0: W, bboxY0: H, bboxX1: -1, bboxY1: -1
       };
       bm.life.fill(1);
       bm.lifeNext.fill(1);
@@ -2205,24 +2344,6 @@ document.getElementById('clearOnChangeCheck').onchange = function(e) { clearOnCh
 document.getElementById('showMaskCheck').onchange = function(e) { showMask = e.target.checked; };
 document.getElementById('clearBtn').onclick = clearCanvas;
 document.getElementById('upscale2xBtn').onclick = upscaleSimulation2x;
-document.getElementById('fullscreen1080pBtn').onclick = enterFullscreen1080;
-
-document.addEventListener('fullscreenchange', onFullscreenChange);
-document.addEventListener('webkitfullscreenchange', onFullscreenChange);
-document.addEventListener('mozfullscreenchange', onFullscreenChange);
-document.addEventListener('MSFullscreenChange', onFullscreenChange);
-window.addEventListener('resize', function() {
-  if (isMainCanvasFullscreen()) applyFullscreenPixelLayout();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key !== 'Escape') return;
-  var fsEl = document.fullscreenElement || document.webkitFullscreenElement ||
-    document.mozFullScreenElement || document.msFullscreenElement;
-  if (!fsEl) return;
-  var exitFn = document.exitFullscreen || document.webkitExitFullscreen ||
-    document.mozCancelFullScreen || document.msExitFullscreen;
-  if (exitFn) exitFn.call(document);
-});
 
 document.querySelectorAll('input[name=alignment]').forEach(function(r) {
   r.onchange = function() {

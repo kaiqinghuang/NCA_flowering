@@ -6,3 +6,6 @@ background_multiPerlin.html
 background_multiPerlin_4move_highResol2.html
 background_multiPerlin_flower_7move.html
 background_multiPerlin_flower_static.html
+.claude/
+.venv/
+**/__pycache__/
