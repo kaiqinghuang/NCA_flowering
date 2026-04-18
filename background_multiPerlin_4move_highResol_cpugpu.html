@@ -351,7 +351,7 @@ var CH = 12;         // texture NCA channels
 var FILTER_N = 4;    // identity, sobel_x, sobel_y, laplacian
 var PERCEPTION_N = CH * FILTER_N;  // 48
 /** Logical grid size (buffers + TF tensors). After changing W or H, call initCanvas() to rebuild. */
-var W = 480, H = 270;
+var W = 270, H = 480;
 
 /**
  * Perlin sample coordinates use one reference span for both axes so blobs are not “squashed” when W≠H.
