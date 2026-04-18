@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NCA Remote — WebP stream</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #111; color: #eee; min-height: 100vh; }
+  .header { background: #1a1a1a; padding: 12px 20px; border-bottom: 1px solid #333;
+            display: flex; gap: 16px; align-items: center; }
+  .header h1 { font-size: 16px; }
+  #status { font-size: 12px; color: #999; }
+  .main { display: flex; gap: 16px; padding: 16px; }
+  .sidebar { width: 280px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: #1a1a1a; border-radius: 8px; padding: 12px; border: 1px solid #333; }
+  .panel h3 { font-size: 11px; color: #aaa; text-transform: uppercase; letter-spacing: 1px;
+              margin-bottom: 8px; font-weight: 700; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 12px; }
+  .row label { width: 80px; color: #888; }
+  .row select, .row input[type=range] { flex: 1 1 0; min-width: 0; max-width: 100%; }
+  .row select { text-overflow: ellipsis; }
+  .sidebar { overflow: hidden; }
+  .row .val { width: 36px; text-align: right; color: #fff; font-size: 11px; }
+  .btn { padding: 5px 10px; border: 1px solid #555; border-radius: 4px; background: #222;
+         color: #ccc; cursor: pointer; font-size: 11px; }
+  .btn:hover { background: #333; border-color: #888; }
+  .brush-item { padding: 5px 8px; background: #222; border-radius: 4px; margin-bottom: 4px;
+                font-size: 12px; display: flex; align-items: center; gap: 8px; cursor: pointer;
+                border: 1px solid transparent; }
+  .brush-item.selected { border-color: #888; background: #2d2d2d; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  canvas { border: 1px solid #333; border-radius: 6px; image-rendering: pixelated;
+           background: #000; cursor: crosshair;
+           touch-action: none; -ms-touch-action: none;
+           -webkit-user-select: none; user-select: none; }
+  .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
+  #info { font-size: 11px; color: #666; margin-top: 8px; }
+  .help { font-size: 11px; color: #666; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>NCA Remote</h1>
+  <div id="status">Connecting…</div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Base models (A/B/C/D)</h3>
+      <div class="row"><label>A</label><select id="baseA"></select></div>
+      <div class="row"><label>B</label><select id="baseB"></select></div>
+      <div class="row"><label>C</label><select id="baseC"></select></div>
+      <div class="row"><label>D</label><select id="baseD"></select></div>
+    </div>
+
+    <div class="panel">
+      <h3>Brush models</h3>
+      <div class="row">
+        <select id="brushPicker" style="flex:1"></select>
+        <button class="btn" id="addBrushBtn">+ add</button>
+      </div>
+      <div id="brushList"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="row"><label>Active</label><input type="checkbox" id="activeChk" checked></div>
+      <div class="row"><label>Disturb</label><input type="checkbox" id="disturbChk"></div>
+      <div class="row"><label>Tint</label><input type="checkbox" id="tintChk"></div>
+      <div class="row"><label>Alignment</label>
+        <select id="alignSel">
+          <option value="0">Cartesian</option>
+          <option value="1">Polar</option>
+          <option value="2" selected>Bipolar</option>
+        </select>
+      </div>
+      <div class="row"><label>Rotation</label>
+        <input type="range" id="rotRange" min="0" max="360" value="0">
+        <span class="val" id="rotVal">0</span>
+      </div>
+      <div class="row"><label>Speed</label>
+        <input type="range" id="speedRange" min="1" max="16" value="1">
+        <span class="val" id="speedVal">1</span>
+      </div>
+      <div class="row"><label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="6" value="1" step="0.5">
+        <span class="val" id="zoomVal">1</span>
+      </div>
+      <button class="btn" id="clearBtn">Clear canvas</button>
+      <button class="btn" id="reseedBtn">New noise seed</button>
+    </div>
+
+    <div class="panel">
+      <h3>Perlin (altitude bands)</h3>
+      <div class="row"><label>Scale</label>
+        <input type="range" id="nsRange" min="1" max="7" value="1.5" step="0.05">
+        <span class="val" id="nsVal">1.50</span>
+      </div>
+      <div class="row"><label>Octaves</label>
+        <input type="range" id="ocRange" min="100" max="250" value="100" step="1">
+        <span class="val" id="ocVal">1.00</span>
+      </div>
+      <div class="row"><label>Blend half</label>
+        <input type="range" id="bhRange" min="0" max="120" value="20" step="1">
+        <span class="val" id="bhVal">0.020</span>
+      </div>
+      <div class="row"><label>Z speed</label>
+        <input type="range" id="zsRange" min="0" max="200" value="0" step="1">
+        <span class="val" id="zsVal">0.000</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Brush</h3>
+      <div class="row"><label>Size</label>
+        <input type="range" id="brushSize" min="1" max="20" value="3">
+        <span class="val" id="brushSizeVal">3</span>
+      </div>
+      <div class="row"><label>Threshold</label>
+        <input type="range" id="thrRange" min="2" max="98" value="50">
+        <span class="val" id="thrVal">0.50</span>
+      </div>
+      <div class="row"><label>Edge</label>
+        <input type="range" id="edgeRange" min="1" max="80" value="30">
+        <span class="val" id="edgeVal">30</span>
+      </div>
+      <button class="btn" id="clearBrushBtn">Clear selected mask</button>
+    </div>
+  </div>
+
+  <div class="canvas-area">
+    <canvas id="canvas"></canvas>
+    <div id="info">no frames yet</div>
+    <div class="help">
+      Hold left button and drag to paint with the selected brush model.
+      <strong>Shift</strong> + drag erases.
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ----- Config -----
+var W = 480, H = 270;            // overwritten by hello msg
+var zoom = 1;
+var ws = null;
+var wsReady = false;
+
+// ----- DOM -----
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+var statusEl = document.getElementById('status');
+var infoEl = document.getElementById('info');
+
+// ----- State -----
+var availableModels = [];        // [filename...]
+var brushes = [];                // [{id, name, color}]
+var selectedBrushId = null;
+var brushSize = 3;
+var isDrawing = false;
+var frameCount = 0;
+var bytesRecv = 0;
+var lastSampleT = performance.now();
+var fps = 0, kbps = 0;
+
+// ----- WS connect -----
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws');
+  ws.binaryType = 'blob';
+  ws.onopen = function() {
+    wsReady = true;
+    statusEl.textContent = 'Connected';
+  };
+  ws.onclose = function() {
+    wsReady = false;
+    statusEl.textContent = 'Disconnected — retry in 2s';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = function() { statusEl.textContent = 'WS error'; };
+  ws.onmessage = function(ev) {
+    if (typeof ev.data === 'string') {
+      handleJson(JSON.parse(ev.data));
+    } else {
+      bytesRecv += ev.data.size;
+      drawFrameBlob(ev.data);
+    }
+  };
+}
+
+function send(obj) {
+  if (wsReady) ws.send(JSON.stringify(obj));
+}
+
+function handleJson(msg) {
+  if (msg.type === 'hello') {
+    W = msg.W; H = msg.H;
+    canvas.width = W; canvas.height = H;
+    applyZoom();
+    statusEl.textContent = 'Connected — device: ' + msg.device + ' | ' + W + '×' + H;
+    availableModels = msg.models || [];
+    populateModelSelectors();
+  } else if (msg.type === 'models') {
+    availableModels = msg.models || [];
+    populateModelSelectors();
+  } else if (msg.type === 'loaded_base') {
+    // Could update label per slot if desired
+  } else if (msg.type === 'loaded_brush') {
+    brushes.push({ id: msg.id, name: msg.name, color: msg.color });
+    selectedBrushId = msg.id;
+    rebuildBrushList();
+  } else if (msg.type === 'error') {
+    console.warn('server error:', msg.msg);
+    statusEl.textContent = 'Error: ' + msg.msg;
+  }
+}
+
+// ----- Frame rendering (Blob → ImageBitmap → canvas) -----
+function drawFrameBlob(blob) {
+  // createImageBitmap accepts WebP in modern browsers; falls back gracefully via Image() if not.
+  if (window.createImageBitmap) {
+    createImageBitmap(blob).then(function(bmp) {
+      ctx.drawImage(bmp, 0, 0, W, H);
+      bmp.close && bmp.close();
+      frameCount++;
+    }).catch(function(e) { drawFrameViaImg(blob); });
+  } else {
+    drawFrameViaImg(blob);
+  }
+}
+
+function drawFrameViaImg(blob) {
+  var url = URL.createObjectURL(blob);
+  var img = new Image();
+  img.onload = function() {
+    ctx.drawImage(img, 0, 0, W, H);
+    URL.revokeObjectURL(url);
+    frameCount++;
+  };
+  img.onerror = function() { URL.revokeObjectURL(url); };
+  img.src = url;
+}
+
+// ----- Model selectors -----
+function populateModelSelectors() {
+  var slots = ['baseA', 'baseB', 'baseC', 'baseD'];
+  slots.forEach(function(id) {
+    var sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">— none —</option>';
+    availableModels.forEach(function(name) {
+      var opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    });
+  });
+  var picker = document.getElementById('brushPicker');
+  picker.innerHTML = '';
+  availableModels.forEach(function(name) {
+    var opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    picker.appendChild(opt);
+  });
+}
+
+['baseA', 'baseB', 'baseC', 'baseD'].forEach(function(id, slot) {
+  document.getElementById(id).onchange = function(e) {
+    if (e.target.value) send({ op: 'load_base', slot: slot, path: e.target.value });
+  };
+});
+document.getElementById('addBrushBtn').onclick = function() {
+  var path = document.getElementById('brushPicker').value;
+  console.log('[+add brush] picker value =', JSON.stringify(path), '| availableModels =', availableModels.length);
+  if (!path) {
+    statusEl.textContent = 'No brush model selected — pick one in the dropdown first';
+    return;
+  }
+  console.log('[+add brush] sending load_brush:', path);
+  send({ op: 'load_brush', path: path });
+};
+
+function rebuildBrushList() {
+  var list = document.getElementById('brushList');
+  list.innerHTML = '';
+  brushes.forEach(function(bm) {
+    var row = document.createElement('div');
+    row.className = 'brush-item' + (bm.id === selectedBrushId ? ' selected' : '');
+    row.onclick = function() { selectedBrushId = bm.id; rebuildBrushList(); };
+    var dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = 'rgb(' + bm.color.map(Math.round).join(',') + ')';
+    var name = document.createElement('span');
+    name.style.flex = '1'; name.textContent = bm.name;
+    var rm = document.createElement('button');
+    rm.className = 'btn'; rm.textContent = '×';
+    rm.onclick = function(e) {
+      e.stopPropagation();
+      send({ op: 'remove_brush', id: bm.id });
+      brushes = brushes.filter(function(b) { return b.id !== bm.id; });
+      if (selectedBrushId === bm.id) selectedBrushId = brushes.length ? brushes[0].id : null;
+      rebuildBrushList();
+    };
+    row.appendChild(dot); row.appendChild(name); row.appendChild(rm);
+    list.appendChild(row);
+  });
+}
+
+// ----- Canvas paint events -----
+function clientToGrid(clientX, clientY) {
+  var r = canvas.getBoundingClientRect();
+  var gx = Math.floor((clientX - r.left) / r.width * W);
+  var gy = Math.floor((clientY - r.top) / r.height * H);
+  return [Math.max(0, Math.min(W - 1, gx)), Math.max(0, Math.min(H - 1, gy))];
+}
+
+// Unified pointer events handle mouse, pen, and touch (iPad) in one path.
+var lastDrawGx = -1, lastDrawGy = -1;
+var activePointerId = null;
+var shiftHeldForTouch = false;  // toggled by long-press menu would be ideal; for now use shift key only
+
+window.addEventListener('keydown', function(e) { if (e.key === 'Shift') shiftHeldForTouch = true; });
+window.addEventListener('keyup',   function(e) { if (e.key === 'Shift') shiftHeldForTouch = false; });
+
+function isEraseEvent(e) {
+  return !!e.shiftKey || shiftHeldForTouch;
+}
+
+canvas.addEventListener('pointerdown', function(e) {
+  if (selectedBrushId === null) return;
+  // Mouse: only left button. Touch/pen: button === 0.
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  // Capture so move/up still target the canvas even if the finger leaves it.
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  activePointerId = e.pointerId;
+  isDrawing = true;
+  var g = clientToGrid(e.clientX, e.clientY);
+  lastDrawGx = g[0]; lastDrawGy = g[1];
+  send({ op: 'stamp', id: selectedBrushId, x: g[0], y: g[1], r: brushSize, erase: isEraseEvent(e) });
+});
+
+canvas.addEventListener('pointermove', function(e) {
+  if (!isDrawing || selectedBrushId === null) return;
+  if (activePointerId !== null && e.pointerId !== activePointerId) return;
+  e.preventDefault();
+  var g = clientToGrid(e.clientX, e.clientY);
+  if (g[0] === lastDrawGx && g[1] === lastDrawGy) return;
+  send({
+    op: 'stroke', id: selectedBrushId,
+    x0: lastDrawGx, y0: lastDrawGy,
+    x1: g[0], y1: g[1],
+    r: brushSize, erase: isEraseEvent(e),
+  });
+  lastDrawGx = g[0]; lastDrawGy = g[1];
+});
+
+function endPointer(e) {
+  if (activePointerId !== null && e && e.pointerId !== activePointerId) return;
+  if (activePointerId !== null) {
+    try { canvas.releasePointerCapture(activePointerId); } catch (_) {}
+  }
+  isDrawing = false;
+  lastDrawGx = -1; lastDrawGy = -1;
+  activePointerId = null;
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('pointerleave', function(e) {
+  // Don't end on leave if pointer is captured — capture keeps tracking.
+  if (activePointerId !== null && canvas.hasPointerCapture && canvas.hasPointerCapture(activePointerId)) return;
+  endPointer(e);
+});
+
+// ----- Control bindings -----
+function bindRange(id, valId, op, name, transform) {
+  var r = document.getElementById(id), v = document.getElementById(valId);
+  r.oninput = function() {
+    var raw = parseFloat(r.value);
+    var t = transform ? transform(raw) : raw;
+    v.textContent = (typeof t === 'number') ? (Math.abs(t) < 10 ? t.toFixed(2) : t.toFixed(0)) : t;
+    send({ op: op, name: name, value: t });
+  };
+}
+function bindCheck(id, op, name) {
+  document.getElementById(id).onchange = function(e) {
+    send({ op: op, name: name, value: e.target.checked });
+  };
+}
+
+document.getElementById('alignSel').onchange = function(e) {
+  send({ op: 'set_param', name: 'alignment', value: parseInt(e.target.value, 10) });
+};
+bindRange('rotRange', 'rotVal', 'set_param', 'rotation_deg');
+bindRange('speedRange', 'speedVal', 'set_param', 'steps_per_frame');
+bindCheck('activeChk', 'set_param', 'active');
+bindCheck('disturbChk', 'set_param', 'disturbance');
+bindCheck('tintChk', 'set_param', 'show_mask_tint');
+bindRange('nsRange', 'nsVal', 'set_param', 'noise_scale');
+bindRange('ocRange', 'ocVal', 'set_param', 'octaves', function(x) { return x / 100; });
+bindRange('bhRange', 'bhVal', 'set_param', 'half_width', function(x) { return x / 1000; });
+bindRange('zsRange', 'zsVal', 'set_param', 'noise_z_speed', function(x) { return x / 4000; });
+bindRange('thrRange', 'thrVal', 'set_param', 'mask_threshold', function(x) { return x / 100; });
+bindRange('edgeRange', 'edgeVal', 'set_param', 'mask_edge_sharpness');
+
+document.getElementById('zoomRange').oninput = function(e) {
+  zoom = parseFloat(e.target.value);
+  document.getElementById('zoomVal').textContent = zoom;
+  applyZoom();
+};
+document.getElementById('brushSize').oninput = function(e) {
+  brushSize = parseInt(e.target.value, 10);
+  document.getElementById('brushSizeVal').textContent = String(brushSize);
+};
+document.getElementById('clearBtn').onclick = function() { send({ op: 'clear_state' }); };
+document.getElementById('reseedBtn').onclick = function() { send({ op: 'reseed' }); };
+document.getElementById('clearBrushBtn').onclick = function() {
+  if (selectedBrushId !== null) send({ op: 'clear_brush', id: selectedBrushId });
+};
+
+function applyZoom() {
+  canvas.style.width = Math.round(W * zoom) + 'px';
+  canvas.style.height = Math.round(H * zoom) + 'px';
+}
+
+// ----- FPS / bandwidth sampler -----
+setInterval(function() {
+  var now = performance.now();
+  var dt = (now - lastSampleT) / 1000;
+  fps = frameCount / dt;
+  kbps = (bytesRecv * 8 / 1024) / dt;
+  frameCount = 0; bytesRecv = 0; lastSampleT = now;
+  infoEl.textContent = 'FPS: ' + fps.toFixed(1) + ' | ' + kbps.toFixed(0) + ' kbps' +
+    ' | brushes: ' + brushes.length + (selectedBrushId !== null ? ' (sel #' + selectedBrushId + ')' : '');
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>
