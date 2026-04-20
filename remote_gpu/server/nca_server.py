@@ -52,7 +52,7 @@ H = int(os.environ.get("NCA_H", "540"))
 W = int(os.environ.get("NCA_W", "960"))
 TARGET_FPS = float(os.environ.get("NCA_FPS", "30"))
 TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "60"))
-WEBP_QUALITY = int(os.environ.get("NCA_WEBP_Q", "95"))
+WEBP_QUALITY = int(os.environ.get("NCA_WEBP_Q", "98"))
 PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
 # Cap how many paint events one step can drain. Lower value = smoother
 # step times during fast painting (excess events queue up and get processed

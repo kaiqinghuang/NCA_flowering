@@ -92,7 +92,7 @@ class Params:
     # Spray paint feel (matches background_multiPerlin_4move_highResol_cpugpu_rotate.html)
     spray_splatter_amount: int = 10     # # of small jittered dots around main disk
     spray_splatter_radius: float = 27.0 # max offset of splatter dots (in px)
-    spray_drip_threshold: float = 0.55  # wet build-up before a drip can spawn
+    spray_drip_threshold: float = 0.45  # wet build-up before a drip can spawn
     spray_drip_speed: float = 0.40      # 0..1, higher = faster drips
     spray_drip_wobble: float = 0.25     # 0..1, sideways drift while dripping
     spray_drip_min_width: float = 1.0

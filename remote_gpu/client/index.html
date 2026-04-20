@@ -147,8 +147,8 @@
         <span class="val" id="spRadVal">27</span>
       </div>
       <div class="row"><label>Drip thr</label>
-        <input type="range" id="dripThrRange" min="4" max="200" value="55" step="1">
-        <span class="val" id="dripThrVal">0.55</span>
+        <input type="range" id="dripThrRange" min="4" max="200" value="45" step="1">
+        <span class="val" id="dripThrVal">0.45</span>
       </div>
       <div class="row"><label>Drip spd</label>
         <input type="range" id="dripSpdRange" min="4" max="80" value="40" step="1">
@@ -256,14 +256,22 @@ function handleJson(msg) {
   }
 }
 
-// ----- Frame rendering (decode throttle + paced draw) -----
+// ----- Frame rendering (jitter buffer + paced draw with adaptive rate) -----
 var frameBuffer = [];
 var isRendering = false;
 var pendingDecodes = 0;
-var MAX_BUFFERED_FRAMES = 4;
+// Bigger buffer absorbs network/encode bursts without dropping frames;
+// renderer rate-adapts to keep occupancy near JITTER_TARGET_FRAMES.
+var MAX_BUFFERED_FRAMES = 8;
+var JITTER_TARGET_FRAMES = 3;       // steady-state buffer occupancy
+var JITTER_PREROLL_FRAMES = 3;      // wait this many before first frame
 var MAX_PENDING_DECODE = 2;
-var renderIntervalMs = 1000 / 30;
+var BASE_RENDER_INTERVAL_MS = 1000 / 30;
+var MIN_RENDER_INTERVAL_MS = BASE_RENDER_INTERVAL_MS * 0.95;  // can speed up ~5%
+var MAX_RENDER_INTERVAL_MS = BASE_RENDER_INTERVAL_MS * 1.05;  // can slow down ~5%
+var renderIntervalMs = BASE_RENDER_INTERVAL_MS;
 var nextRenderAt = 0;
+var hasPrerolled = false;           // pre-roll only on first playback start
 
 function closeBitmapSafe(bmp) {
   if (bmp && bmp.close) bmp.close();
@@ -271,12 +279,17 @@ function closeBitmapSafe(bmp) {
 
 function pushFrameBitmap(bmp) {
   frameBuffer.push(bmp);
-  // Prefer freshest frame under burst traffic to reduce visible hitching.
+  // Hard cap: under sustained overload, drop the oldest frame.
   while (frameBuffer.length > MAX_BUFFERED_FRAMES) {
     closeBitmapSafe(frameBuffer.shift());
   }
-  if (!isRendering) {
+  // First time: wait until we have a small reserve so the first network
+  // burst doesn't immediately drain the buffer and freeze the canvas.
+  // Subsequent re-starts (after underrun) start immediately to minimize lag.
+  var threshold = hasPrerolled ? 1 : JITTER_PREROLL_FRAMES;
+  if (!isRendering && frameBuffer.length >= threshold) {
     isRendering = true;
+    hasPrerolled = true;
     nextRenderAt = performance.now();
     requestAnimationFrame(renderLoop);
   }
@@ -311,6 +324,23 @@ function renderLoop(now) {
     ctx.drawImage(bmp, 0, 0, W, H);
     closeBitmapSafe(bmp);
     frameCount++;
+    // Adaptive playback rate: nudge the inter-frame interval to keep the
+    // buffer hovering near JITTER_TARGET_FRAMES. Steps are tiny (±0.2ms) so
+    // playback speed varies <±5% — imperceptible visually, but enough to
+    // soak up small arrival jitter without dropping or freezing frames.
+    var occ = frameBuffer.length;
+    if (occ > JITTER_TARGET_FRAMES) {
+      renderIntervalMs = Math.max(MIN_RENDER_INTERVAL_MS, renderIntervalMs - 0.20);
+    } else if (occ < JITTER_TARGET_FRAMES) {
+      renderIntervalMs = Math.min(MAX_RENDER_INTERVAL_MS, renderIntervalMs + 0.20);
+    } else {
+      // At target: gently relax back toward base rate.
+      if (renderIntervalMs > BASE_RENDER_INTERVAL_MS) {
+        renderIntervalMs = Math.max(BASE_RENDER_INTERVAL_MS, renderIntervalMs - 0.05);
+      } else if (renderIntervalMs < BASE_RENDER_INTERVAL_MS) {
+        renderIntervalMs = Math.min(BASE_RENDER_INTERVAL_MS, renderIntervalMs + 0.05);
+      }
+    }
     nextRenderAt += renderIntervalMs;
     // If we fell behind (tab hiccup / GC), realign instead of burst-draining.
     if (now - nextRenderAt > renderIntervalMs * 2) {
