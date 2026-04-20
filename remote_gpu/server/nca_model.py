@@ -90,7 +90,7 @@ class Params:
     mask_edge_sharpness: float = 33.0
     # Spray paint feel (matches background_multiPerlin_4move_highResol_cpugpu_rotate.html)
     spray_splatter_amount: int = 10     # # of small jittered dots around main disk
-    spray_splatter_radius: float = 35.0 # max offset of splatter dots (in px)
+    spray_splatter_radius: float = 27.0 # max offset of splatter dots (in px)
     spray_drip_threshold: float = 0.40  # wet build-up before a drip can spawn
     spray_drip_speed: float = 0.40      # 0..1, higher = faster drips
     spray_drip_wobble: float = 0.25     # 0..1, sideways drift while dripping
@@ -419,12 +419,14 @@ class NCASimulator:
                 ox = rnd * math.cos(angle) * splat_r
                 oy = rnd * math.sin(angle) * splat_r
                 dist = math.hypot(ox, oy)
-                # Distance falloff (inner dots bigger). Slightly softened so
-                # outer dots can occasionally be sizeable.
-                falloff = 0.45 + 0.55 * (1.0 - dist * inv_splat_r)
-                # Size jitter: most dots small, occasional bigger "blob".
-                # Range ~0.55..1.75 — visible variety but no huge outliers.
-                size_jitter = 0.55 + (np.random.random() ** 1.6) * 1.2
+                # Stronger radial falloff so the "spray gradient" (big near
+                # the brush, small far away) reads clearly. Edge dots are
+                # markedly smaller than centre ones.
+                falloff = 0.30 + 0.70 * (1.0 - dist * inv_splat_r)  # 0.30..1.0
+                # Tightened jitter so dots at the same radius don't differ
+                # wildly. Mild power skew keeps the occasional slightly
+                # bigger "blob" but no extreme outliers.
+                size_jitter = 0.75 + (np.random.random() ** 1.3) * 0.45  # ~0.75..1.20
                 dot_r = max(0.5, size * falloff * size_jitter)
                 splat_dots.append((ox, oy, dot_r))
 
@@ -551,13 +553,20 @@ class NCASimulator:
 
             for li in picked_local:
                 over_ratio = float(top_vals[li]) / max(thr, 1e-6)
-                # Bimodal length distribution: most drips are short (3..33 px),
-                # but a 15% "lucky" tail extends them by +10..37 px to produce
-                # the occasional long streamer (max ≈ 70 px). Mimics real spray
-                # paint where most droplets stop quickly but a few keep flowing.
+                # Trimodal length distribution:
+                #   ~85% short        : 3..33 px  (base)
+                #   ~15% long         : 13..70 px (base + 10..37 bonus)
+                #   ~rare runaway     : 73..400 px (base + 70..330 mega-bonus),
+                #                       2% chance AND gated on over_ratio > 4
+                # The runaway tier is gated behind high wetness so it only
+                # triggers when paint has pooled heavily in one spot — i.e.
+                # long-press / repeated overpaint. Quick normal strokes keep
+                # drips in the 3..70 range.
                 drip_len = 3 + int(np.random.random() * 10.0 * over_ratio)
                 if np.random.random() < 0.15:
                     drip_len += 10 + int(np.random.random() * 27)
+                if over_ratio > 4.0 and np.random.random() < 0.01:
+                    drip_len += 70 + int(np.random.random() * 260)
                 drip_w = max(min_w, 1.5 + np.random.random() * 1.5)
                 flat_i = int(top_idx[li])
                 bm.drips.append({

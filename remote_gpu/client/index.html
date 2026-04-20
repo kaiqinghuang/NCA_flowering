@@ -31,9 +31,14 @@
   .brush-item.selected { border-color: #888; background: #2d2d2d; }
   .dot { width: 10px; height: 10px; border-radius: 50%; }
   canvas { border: 1px solid #333; border-radius: 6px; image-rendering: pixelated;
+           image-rendering: -moz-crisp-edges; image-rendering: crisp-edges;
            background: #000; cursor: crosshair;
            touch-action: none; -ms-touch-action: none;
            -webkit-user-select: none; user-select: none; }
+  canvas:fullscreen { border: none; border-radius: 0; background: #000;
+                      width: 1920px; height: 1080px; }
+  canvas:-webkit-full-screen { border: none; border-radius: 0; background: #000;
+                                width: 1920px; height: 1080px; }
   .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
   #info { font-size: 11px; color: #666; margin-top: 8px; }
   .help { font-size: 11px; color: #666; margin-top: 6px; }
@@ -91,6 +96,7 @@
       </div>
       <button class="btn" id="clearBtn">Clear canvas</button>
       <button class="btn" id="reseedBtn">New noise seed</button>
+      <button class="btn" id="fsBtn">Fullscreen 1920×1080</button>
     </div>
 
     <div class="panel">
@@ -116,8 +122,8 @@
     <div class="panel">
       <h3>Brush</h3>
       <div class="row"><label>Size</label>
-        <input type="range" id="brushSize" min="1" max="20" value="5">
-        <span class="val" id="brushSizeVal">5</span>
+        <input type="range" id="brushSize" min="1" max="20" value="4">
+        <span class="val" id="brushSizeVal">4</span>
       </div>
       <div class="row"><label>Threshold</label>
         <input type="range" id="thrRange" min="2" max="98" value="50">
@@ -137,8 +143,8 @@
         <span class="val" id="spAmtVal">10</span>
       </div>
       <div class="row"><label>Splat R</label>
-        <input type="range" id="spRadRange" min="2" max="100" value="35" step="1">
-        <span class="val" id="spRadVal">35</span>
+        <input type="range" id="spRadRange" min="2" max="100" value="27" step="1">
+        <span class="val" id="spRadVal">27</span>
       </div>
       <div class="row"><label>Drip thr</label>
         <input type="range" id="dripThrRange" min="4" max="200" value="40" step="1">
@@ -187,7 +193,7 @@ var infoEl = document.getElementById('info');
 var availableModels = [];        // [filename...]
 var brushes = [];                // [{id, name, color}]
 var selectedBrushId = null;
-var brushSize = 5;
+var brushSize = 4;
 var isDrawing = false;
 var frameCount = 0;
 var bytesRecv = 0;
@@ -578,6 +584,36 @@ document.getElementById('reseedBtn').onclick = function() { send({ op: 'reseed' 
 document.getElementById('clearBrushBtn').onclick = function() {
   if (selectedBrushId !== null) send({ op: 'clear_brush', id: selectedBrushId });
 };
+
+// ----- Fullscreen 1920×1080 (pure 2× nearest-neighbor upscale from 960×540) -----
+// `image-rendering: pixelated` on the canvas guarantees the browser uses
+// nearest-neighbor sampling, so a single source pixel becomes exactly a 2×2
+// block at the 1920×1080 target. No blending, no smoothing.
+document.getElementById('fsBtn').onclick = function() {
+  var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (!fsEl) {
+    var req = canvas.requestFullscreen || canvas.webkitRequestFullscreen;
+    if (req) req.call(canvas);
+  } else {
+    var exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) exit.call(document);
+  }
+};
+
+function onFullscreenChange() {
+  var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (fsEl === canvas) {
+    // Fixed 1920×1080 CSS size. CSS rules above pin it to this even though
+    // the element is the fullscreen root, so the canvas is centered on a
+    // black background when the physical screen is larger.
+    canvas.style.width = '1920px';
+    canvas.style.height = '1080px';
+  } else {
+    applyZoom();
+  }
+}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 
 function applyZoom() {
   canvas.style.width = Math.round(W * zoom) + 'px';
