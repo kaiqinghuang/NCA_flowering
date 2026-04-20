@@ -122,8 +122,8 @@
     <div class="panel">
       <h3>Brush</h3>
       <div class="row"><label>Size</label>
-        <input type="range" id="brushSize" min="1" max="20" value="4">
-        <span class="val" id="brushSizeVal">4</span>
+        <input type="range" id="brushSize" min="1" max="20" value="5">
+        <span class="val" id="brushSizeVal">5</span>
       </div>
       <div class="row"><label>Threshold</label>
         <input type="range" id="thrRange" min="2" max="98" value="43">
@@ -139,12 +139,12 @@
     <div class="panel">
       <h3>Spray (splatter + drip)</h3>
       <div class="row"><label>Splatter</label>
-        <input type="range" id="spAmtRange" min="0" max="40" value="10" step="1">
-        <span class="val" id="spAmtVal">10</span>
+        <input type="range" id="spAmtRange" min="0" max="40" value="12" step="1">
+        <span class="val" id="spAmtVal">12</span>
       </div>
       <div class="row"><label>Splat R</label>
-        <input type="range" id="spRadRange" min="2" max="100" value="27" step="1">
-        <span class="val" id="spRadVal">27</span>
+        <input type="range" id="spRadRange" min="2" max="100" value="30" step="1">
+        <span class="val" id="spRadVal">30</span>
       </div>
       <div class="row"><label>Drip thr</label>
         <input type="range" id="dripThrRange" min="4" max="200" value="45" step="1">
@@ -193,7 +193,7 @@ var infoEl = document.getElementById('info');
 var availableModels = [];        // [filename...]
 var brushes = [];                // [{id, name, color}]
 var selectedBrushId = null;
-var brushSize = 4;
+var brushSize = 5;
 var isDrawing = false;
 var frameCount = 0;
 var bytesRecv = 0;

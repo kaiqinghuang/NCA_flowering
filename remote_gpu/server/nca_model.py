@@ -90,8 +90,8 @@ class Params:
     mask_threshold: float = 0.43
     mask_edge_sharpness: float = 33.0
     # Spray paint feel (matches background_multiPerlin_4move_highResol_cpugpu_rotate.html)
-    spray_splatter_amount: int = 10     # # of small jittered dots around main disk
-    spray_splatter_radius: float = 27.0 # max offset of splatter dots (in px)
+    spray_splatter_amount: int = 12     # # of small jittered dots around main disk
+    spray_splatter_radius: float = 30.0 # max offset of splatter dots (in px)
     spray_drip_threshold: float = 0.45  # wet build-up before a drip can spawn
     spray_drip_speed: float = 0.40      # 0..1, higher = faster drips
     spray_drip_wobble: float = 0.25     # 0..1, sideways drift while dripping
@@ -422,12 +422,13 @@ class NCASimulator:
                 dist = math.hypot(ox, oy)
                 # Stronger radial falloff so the "spray gradient" (big near
                 # the brush, small far away) reads clearly. Edge dots are
-                # markedly smaller than centre ones.
-                falloff = 0.30 + 0.70 * (1.0 - dist * inv_splat_r)  # 0.30..1.0
+                # markedly smaller than centre ones. Ceiling trimmed to 0.95
+                # so centre dots no longer rival the main disk in size.
+                falloff = 0.28 + 0.67 * (1.0 - dist * inv_splat_r)  # 0.28..0.95
                 # Tightened jitter so dots at the same radius don't differ
-                # wildly. Mild power skew keeps the occasional slightly
-                # bigger "blob" but no extreme outliers.
-                size_jitter = 0.75 + (np.random.random() ** 1.3) * 0.45  # ~0.75..1.20
+                # wildly. Upper bound pulled in a bit to reduce the stray
+                # "chunky blob" dots that looked too solid for real spray.
+                size_jitter = 0.72 + (np.random.random() ** 1.3) * 0.38  # ~0.72..1.10
                 dot_r = max(0.5, size * falloff * size_jitter)
                 splat_dots.append((ox, oy, dot_r))
 
