@@ -58,6 +58,12 @@ PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
 # step times during fast painting (excess events queue up and get processed
 # in the next steps), at the cost of a tiny amount of input latency.
 PAINT_BATCH_LIMIT = int(os.environ.get("NCA_PAINT_BATCH_LIMIT", "96"))
+# Throttle drip spawning + evolution to every Nth sim step. evolve_drips is
+# the dominant per-step cost once many drips are alive (each drip costs ~7
+# GPU dispatches), so halving its frequency directly halves that long-tail
+# cost. base_speed in spawn_drips is divided by the same factor to keep the
+# wall-clock drip flow speed unchanged.
+DRIP_EVOLVE_EVERY = int(os.environ.get("NCA_DRIP_EVOLVE_EVERY", "2"))
 SCRIPT_DIR = Path(__file__).parent.resolve()
 _default_models = (SCRIPT_DIR / ".." / ".." / "texture_model").resolve()
 _env_models = os.environ.get("NCA_MODELS_DIR")
@@ -105,6 +111,7 @@ clients: set[ClientConnection] = set()
 clients_lock = asyncio.Lock()
 paint_queue = deque(maxlen=PAINT_QUEUE_MAX)
 paint_queue_lock = threading.Lock()
+_drip_tick = 0
 
 
 def list_available_models() -> list[str]:
@@ -274,10 +281,15 @@ def _step_blocking():
 
     # Spawn new drips from the wet pool laid down by the just-applied paint
     # events, then evolve all live drips one tick. Both run even when sim is
-    # paused so paint visibly drips after you stop painting.
-    with sim.lock:
-        sim.spawn_drips()
-        sim.evolve_drips()
+    # paused so paint visibly drips after you stop painting. Throttled to
+    # every Nth step (see DRIP_EVOLVE_EVERY) to cap drip-related GPU load.
+    global _drip_tick
+    _drip_tick += 1
+    if _drip_tick >= DRIP_EVOLVE_EVERY:
+        _drip_tick = 0
+        with sim.lock:
+            sim.spawn_drips()
+            sim.evolve_drips()
 
     n = 0
     if sim.p.active:

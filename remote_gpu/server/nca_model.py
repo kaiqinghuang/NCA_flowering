@@ -59,16 +59,17 @@ class BrushModel:
 
 
 # Hard cap to keep evolve_drips bounded under heavy painting
-MAX_DRIPS_PER_BRUSH = 256
+MAX_DRIPS_PER_BRUSH = 96
 
 # Hard cap on how many stamps a single paint segment can place. Without this,
 # a fast pointer move (e.g. 600 px between two 60Hz events) would flood the
 # GPU dispatch queue with 600 stamps and stall the sim loop for tens of ms.
 # Each stamp issues ~10 dispatches on MPS, so this cap directly bounds the
-# worst-case step time spent in painting. 20 keeps fast strokes well under
-# the 33ms / 30fps budget while still feeling continuous (the splatter
-# texture hides the slight gaps that appear at very high pointer speed).
-MAX_STAMPS_PER_SEGMENT = 20
+# worst-case step time spent in painting. 14 keeps fast strokes well under
+# the 33ms / 30fps budget even when system jitter (CPU contention from
+# encoding or other processes) piles on top. The splatter texture masks
+# the slight stamp gaps that appear at very high pointer speed.
+MAX_STAMPS_PER_SEGMENT = 14
 
 
 @dataclass
@@ -515,7 +516,11 @@ class NCASimulator:
         if thr <= 0.0 or chance <= 0.0:
             return
         drip_speed = float(self.p.spray_drip_speed)
-        base_speed = max(2, int(round(6 - drip_speed * 8)))
+        # evolve_drips is called every Nth sim step (server-side throttle,
+        # default N=2), so we halve the inner-tick speed counter here to keep
+        # the wall-clock drip flow speed unchanged. min=1 → moves on every
+        # evolve call.
+        base_speed = max(1, int(round((6 - drip_speed * 8) * 0.5)))
         min_w = float(self.p.spray_drip_min_width)
         W = self.p.W
 
@@ -546,9 +551,13 @@ class NCASimulator:
 
             for li in picked_local:
                 over_ratio = float(top_vals[li]) / max(thr, 1e-6)
-                # 3..(3 + 10*over_ratio) — short to long depending on wetness.
-                # Heavy spots (over_ratio≈3) → up to ~33 px persistent drips.
+                # Bimodal length distribution: most drips are short (3..33 px),
+                # but a 15% "lucky" tail extends them by +10..37 px to produce
+                # the occasional long streamer (max ≈ 70 px). Mimics real spray
+                # paint where most droplets stop quickly but a few keep flowing.
                 drip_len = 3 + int(np.random.random() * 10.0 * over_ratio)
+                if np.random.random() < 0.15:
+                    drip_len += 10 + int(np.random.random() * 27)
                 drip_w = max(min_w, 1.5 + np.random.random() * 1.5)
                 flat_i = int(top_idx[li])
                 bm.drips.append({
