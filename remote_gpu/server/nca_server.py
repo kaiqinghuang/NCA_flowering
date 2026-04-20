@@ -52,9 +52,12 @@ H = int(os.environ.get("NCA_H", "540"))
 W = int(os.environ.get("NCA_W", "960"))
 TARGET_FPS = float(os.environ.get("NCA_FPS", "30"))
 TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "60"))
-WEBP_QUALITY = int(os.environ.get("NCA_WEBP_Q", "70"))
+WEBP_QUALITY = int(os.environ.get("NCA_WEBP_Q", "95"))
 PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
-PAINT_BATCH_LIMIT = int(os.environ.get("NCA_PAINT_BATCH_LIMIT", "384"))
+# Cap how many paint events one step can drain. Lower value = smoother
+# step times during fast painting (excess events queue up and get processed
+# in the next steps), at the cost of a tiny amount of input latency.
+PAINT_BATCH_LIMIT = int(os.environ.get("NCA_PAINT_BATCH_LIMIT", "96"))
 SCRIPT_DIR = Path(__file__).parent.resolve()
 _default_models = (SCRIPT_DIR / ".." / ".." / "texture_model").resolve()
 _env_models = os.environ.get("NCA_MODELS_DIR")

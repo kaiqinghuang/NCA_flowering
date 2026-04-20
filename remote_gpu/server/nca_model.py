@@ -64,9 +64,11 @@ MAX_DRIPS_PER_BRUSH = 256
 # Hard cap on how many stamps a single paint segment can place. Without this,
 # a fast pointer move (e.g. 600 px between two 60Hz events) would flood the
 # GPU dispatch queue with 600 stamps and stall the sim loop for tens of ms.
-# 32 keeps each segment's GPU work bounded; very fast strokes naturally get
-# a "spray-can dot trail" look.
-MAX_STAMPS_PER_SEGMENT = 32
+# Each stamp issues ~10 dispatches on MPS, so this cap directly bounds the
+# worst-case step time spent in painting. 20 keeps fast strokes well under
+# the 33ms / 30fps budget while still feeling continuous (the splatter
+# texture hides the slight gaps that appear at very high pointer speed).
+MAX_STAMPS_PER_SEGMENT = 20
 
 
 @dataclass
