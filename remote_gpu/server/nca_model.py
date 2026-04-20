@@ -69,7 +69,7 @@ MAX_DRIPS_PER_BRUSH = 96
 # the 33ms / 30fps budget even when system jitter (CPU contention from
 # encoding or other processes) piles on top. The splatter texture masks
 # the slight stamp gaps that appear at very high pointer speed.
-MAX_STAMPS_PER_SEGMENT = 14
+MAX_STAMPS_PER_SEGMENT = 16
 
 
 @dataclass
