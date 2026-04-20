@@ -1,12 +1,25 @@
-"""3D Perlin + fBm + altitude quartile weights.
+"""3D Perlin + layered priority-stack base weights (A/B/C/D).
 
-Vectorized NumPy port of the JS implementation in
-background_altitude_webgpu.html. Computes per-pixel altitude band weights
-(A/B/C/D) from animated 3D Perlin noise.
+Implements the same base-layer Perlin logic as the legacy
+background_multiPerlin_4move_highResol_cpugpu_rotate.html:
+- independent Perlin fields for B/C/D
+- per-layer frequency spread + fixed decorrelating phase
+- sigmoid claim per layer
+- priority stack D -> C -> B, and A = remainder
 """
 from __future__ import annotations
 
 import numpy as np
+
+LAYER_PHASE = np.array(
+    [
+        [0.0, 0.0, 0.0],
+        [41.17, 109.3, 27.8],
+        [203.6, 17.2, 91.4],
+        [67.9, 251.1, 156.7],
+    ],
+    dtype=np.float64,
+)
 
 
 class Perlin3D:
@@ -81,10 +94,71 @@ def fbm3d(perlin: Perlin3D, x: np.ndarray, y: np.ndarray, z: np.ndarray, octaves
     return v / norm if norm > 1e-12 else v
 
 
+def _sigmoid_claim(v01: np.ndarray, threshold: float, sharpness: float) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-(v01 - threshold) * sharpness))
+
+
+def layered_base_weights(
+    H: int,
+    W: int,
+    perlin_layers: list[Perlin3D],
+    noise_scale: float = 1.5,
+    octaves: float = 1.0,
+    threshold: float = 0.5,
+    edge_sharpness: float = 30.0,
+    layer_freq_spread: float = 0.55,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
+    z: float = 0.0,
+) -> np.ndarray:
+    """Returns float32 [H, W, 4] base weights for A/B/C/D."""
+    if len(perlin_layers) < 4:
+        raise ValueError("perlin_layers must contain 4 entries for A/B/C/D")
+
+    ys, xs = np.meshgrid(np.arange(H, dtype=np.float64), np.arange(W, dtype=np.float64), indexing="ij")
+    # Match legacy behavior: one reference span for x/y avoids anisotropic stretch.
+    ref = float(max(1, max(W, H)))
+    sx = (xs / ref) * float(noise_scale) + float(offset_x)
+    sy = (ys / ref) * float(noise_scale) + float(offset_y)
+
+    oc = float(np.clip(octaves, 1.0, 14.0))
+    spread = float(np.clip(layer_freq_spread, 0.0, 1.0))
+    thr = float(np.clip(threshold, 0.02, 0.98))
+    sharp = float(np.clip(edge_sharpness, 0.5, 50.0))
+
+    claims: list[np.ndarray] = []
+    for li in (1, 2, 3):
+        lmul = 1.0 + spread * li * 0.28
+        ph = LAYER_PHASE[li]
+        sz = np.full_like(sx, float(z) + ph[2] * 0.15, dtype=np.float64)
+        raw = fbm3d(
+            perlin_layers[li],
+            sx * lmul + ph[0],
+            sy * lmul + ph[1],
+            sz,
+            oc,
+        )
+        m01 = np.clip(raw * 0.5 + 0.5, 0.0, 1.0)
+        claims.append(_sigmoid_claim(m01, thr, sharp))
+
+    a1, a2, a3 = claims
+    rem3 = 1.0 - a3
+    rem23 = rem3 * (1.0 - a2)
+    w3 = a3
+    w2 = rem3 * a2
+    w1 = rem23 * a1
+    w0 = rem23 * (1.0 - a1)
+    out = np.stack([w0, w1, w2, w3], axis=-1).astype(np.float32, copy=False)
+    # Numerical safety: keep sum close to 1.
+    s = out.sum(axis=-1, keepdims=True)
+    out = np.divide(out, np.maximum(s, 1e-8), out=np.zeros_like(out), where=s > 0.0)
+    return out
+
+
 def altitude_weights(
     H: int,
     W: int,
-    perlin: Perlin3D,
+    perlin_layers: list[Perlin3D],
     noise_scale: float = 1.5,
     octaves: float = 1.0,
     half_width: float = 0.02,
@@ -92,51 +166,25 @@ def altitude_weights(
     offset_x: float = 0.0,
     offset_y: float = 0.0,
     z: float = 0.0,
+    threshold: float = 0.5,
+    edge_sharpness: float = 30.0,
+    layer_freq_spread: float = 0.55,
 ) -> np.ndarray:
-    """Returns float32 [H, W, 4] array of A/B/C/D blend weights summing to 1."""
-    ys, xs = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
-    sx = (xs / W) * noise_scale + offset_x
-    sy = (ys / H) * noise_scale + offset_y
-    sz = np.full_like(sx, z, dtype=np.float64)
-    raw = fbm3d(perlin, sx.astype(np.float64), sy.astype(np.float64), sz, octaves)
-    m01 = np.clip(raw * 0.5 + 0.5, 0.0, 1.0)
+    """Compatibility wrapper now using layered base-weight logic.
 
-    e0, e1, e2 = edges
-    h = float(np.clip(half_width, 0.0, 0.124))
-    out = np.zeros((H, W, 4), dtype=np.float32)
-
-    if h < 1e-6:
-        # Hard quartile assignment
-        out[..., 0] = (m01 < e0).astype(np.float32)
-        out[..., 1] = ((m01 >= e0) & (m01 < e1)).astype(np.float32)
-        out[..., 2] = ((m01 >= e1) & (m01 < e2)).astype(np.float32)
-        out[..., 3] = (m01 >= e2).astype(np.float32)
-        return out
-
-    def smoothstep(a, b, x):
-        t = np.clip((x - a) / (b - a), 0.0, 1.0)
-        return t * t * (3.0 - 2.0 * t)
-
-    # Region masks
-    in_pure_a = m01 < e0 - h
-    in_ab = (m01 >= e0 - h) & (m01 < e0 + h)
-    in_pure_b = (m01 >= e0 + h) & (m01 < e1 - h)
-    in_bc = (m01 >= e1 - h) & (m01 < e1 + h)
-    in_pure_c = (m01 >= e1 + h) & (m01 < e2 - h)
-    in_cd = (m01 >= e2 - h) & (m01 < e2 + h)
-    in_pure_d = m01 >= e2 + h
-
-    out[..., 0] = np.where(in_pure_a, 1.0, 0.0)
-    t_ab = smoothstep(e0 - h, e0 + h, m01)
-    out[..., 0] = np.where(in_ab, 1.0 - t_ab, out[..., 0])
-    out[..., 1] = np.where(in_ab, t_ab, 0.0)
-    out[..., 1] = np.where(in_pure_b, 1.0, out[..., 1])
-    t_bc = smoothstep(e1 - h, e1 + h, m01)
-    out[..., 1] = np.where(in_bc, 1.0 - t_bc, out[..., 1])
-    out[..., 2] = np.where(in_bc, t_bc, 0.0)
-    out[..., 2] = np.where(in_pure_c, 1.0, out[..., 2])
-    t_cd = smoothstep(e2 - h, e2 + h, m01)
-    out[..., 2] = np.where(in_cd, 1.0 - t_cd, out[..., 2])
-    out[..., 3] = np.where(in_cd, t_cd, 0.0)
-    out[..., 3] = np.where(in_pure_d, 1.0, out[..., 3])
-    return out
+    `half_width` / `edges` are retained for call compatibility with older code.
+    """
+    _ = (half_width, edges)
+    return layered_base_weights(
+        H=H,
+        W=W,
+        perlin_layers=perlin_layers,
+        noise_scale=noise_scale,
+        octaves=octaves,
+        threshold=threshold,
+        edge_sharpness=edge_sharpness,
+        layer_freq_spread=layer_freq_spread,
+        offset_x=offset_x,
+        offset_y=offset_y,
+        z=z,
+    )

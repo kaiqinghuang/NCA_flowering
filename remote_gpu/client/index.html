@@ -96,16 +96,16 @@
     <div class="panel">
       <h3>Perlin (altitude bands)</h3>
       <div class="row"><label>Scale</label>
-        <input type="range" id="nsRange" min="1" max="7" value="1.5" step="0.05">
-        <span class="val" id="nsVal">1.50</span>
+        <input type="range" id="nsRange" min="1" max="7" value="5" step="0.05">
+        <span class="val" id="nsVal">5.00</span>
       </div>
       <div class="row"><label>Octaves</label>
         <input type="range" id="ocRange" min="100" max="250" value="100" step="1">
         <span class="val" id="ocVal">1.00</span>
       </div>
-      <div class="row"><label>Blend half</label>
-        <input type="range" id="bhRange" min="0" max="120" value="20" step="1">
-        <span class="val" id="bhVal">0.020</span>
+      <div class="row"><label>Layer Δfreq</label>
+        <input type="range" id="bhRange" min="0" max="100" value="55" step="1">
+        <span class="val" id="bhVal">0.55</span>
       </div>
       <div class="row"><label>Z speed</label>
         <input type="range" id="zsRange" min="0" max="200" value="0" step="1">
@@ -116,18 +116,45 @@
     <div class="panel">
       <h3>Brush</h3>
       <div class="row"><label>Size</label>
-        <input type="range" id="brushSize" min="1" max="20" value="3">
-        <span class="val" id="brushSizeVal">3</span>
+        <input type="range" id="brushSize" min="1" max="20" value="5">
+        <span class="val" id="brushSizeVal">5</span>
       </div>
       <div class="row"><label>Threshold</label>
         <input type="range" id="thrRange" min="2" max="98" value="50">
         <span class="val" id="thrVal">0.50</span>
       </div>
       <div class="row"><label>Edge</label>
-        <input type="range" id="edgeRange" min="1" max="80" value="30">
-        <span class="val" id="edgeVal">30</span>
+        <input type="range" id="edgeRange" min="1" max="80" value="33">
+        <span class="val" id="edgeVal">33</span>
       </div>
       <button class="btn" id="clearBrushBtn">Clear selected mask</button>
+    </div>
+
+    <div class="panel">
+      <h3>Spray (splatter + drip)</h3>
+      <div class="row"><label>Splatter</label>
+        <input type="range" id="spAmtRange" min="0" max="40" value="10" step="1">
+        <span class="val" id="spAmtVal">10</span>
+      </div>
+      <div class="row"><label>Splat R</label>
+        <input type="range" id="spRadRange" min="2" max="100" value="35" step="1">
+        <span class="val" id="spRadVal">35</span>
+      </div>
+      <div class="row"><label>Drip thr</label>
+        <input type="range" id="dripThrRange" min="4" max="200" value="40" step="1">
+        <span class="val" id="dripThrVal">0.40</span>
+      </div>
+      <div class="row"><label>Drip spd</label>
+        <input type="range" id="dripSpdRange" min="4" max="80" value="40" step="1">
+        <span class="val" id="dripSpdVal">0.40</span>
+      </div>
+      <div class="row" style="gap:4px;">
+        <label>Gravity</label>
+        <button class="btn dripDirBtn" data-dir="0" title="Down">&#9660;</button>
+        <button class="btn dripDirBtn" data-dir="1" title="Up">&#9650;</button>
+        <button class="btn dripDirBtn" data-dir="2" title="Left">&#9664;</button>
+        <button class="btn dripDirBtn" data-dir="3" title="Right">&#9654;</button>
+      </div>
     </div>
   </div>
 
@@ -160,7 +187,7 @@ var infoEl = document.getElementById('info');
 var availableModels = [];        // [filename...]
 var brushes = [];                // [{id, name, color}]
 var selectedBrushId = null;
-var brushSize = 3;
+var brushSize = 5;
 var isDrawing = false;
 var frameCount = 0;
 var bytesRecv = 0;
@@ -199,6 +226,10 @@ function send(obj) {
 function handleJson(msg) {
   if (msg.type === 'hello') {
     W = msg.W; H = msg.H;
+    var fpsFromServer = Number(msg.fps);
+    if (isFinite(fpsFromServer) && fpsFromServer > 1) {
+      renderIntervalMs = 1000 / fpsFromServer;
+    }
     canvas.width = W; canvas.height = H;
     applyZoom();
     statusEl.textContent = 'Connected — device: ' + msg.device + ' | ' + W + '×' + H;
@@ -219,24 +250,83 @@ function handleJson(msg) {
   }
 }
 
-// ----- Frame rendering (Blob → ImageBitmap → canvas) -----
+// ----- Frame rendering (decode throttle + paced draw) -----
+var frameBuffer = [];
+var isRendering = false;
+var pendingDecodes = 0;
+var MAX_BUFFERED_FRAMES = 4;
+var MAX_PENDING_DECODE = 2;
+var renderIntervalMs = 1000 / 30;
+var nextRenderAt = 0;
+
+function closeBitmapSafe(bmp) {
+  if (bmp && bmp.close) bmp.close();
+}
+
+function pushFrameBitmap(bmp) {
+  frameBuffer.push(bmp);
+  // Prefer freshest frame under burst traffic to reduce visible hitching.
+  while (frameBuffer.length > MAX_BUFFERED_FRAMES) {
+    closeBitmapSafe(frameBuffer.shift());
+  }
+  if (!isRendering) {
+    isRendering = true;
+    nextRenderAt = performance.now();
+    requestAnimationFrame(renderLoop);
+  }
+}
+
 function drawFrameBlob(blob) {
-  // createImageBitmap accepts WebP in modern browsers; falls back gracefully via Image() if not.
+  // Decode can be bursty; cap concurrent decodes so UI thread remains stable.
+  if (pendingDecodes >= MAX_PENDING_DECODE && frameBuffer.length >= MAX_BUFFERED_FRAMES - 1) {
+    return;
+  }
   if (window.createImageBitmap) {
+    pendingDecodes++;
     createImageBitmap(blob).then(function(bmp) {
-      ctx.drawImage(bmp, 0, 0, W, H);
-      bmp.close && bmp.close();
-      frameCount++;
-    }).catch(function(e) { drawFrameViaImg(blob); });
+      pushFrameBitmap(bmp);
+    }).catch(function() {
+      drawFrameViaImg(blob);
+    }).finally(function() {
+      pendingDecodes = Math.max(0, pendingDecodes - 1);
+    });
   } else {
     drawFrameViaImg(blob);
   }
+}
+
+function renderLoop(now) {
+  if (frameBuffer.length === 0) {
+    isRendering = false;
+    return;
+  }
+  if (now >= nextRenderAt) {
+    var bmp = frameBuffer.shift();
+    ctx.drawImage(bmp, 0, 0, W, H);
+    closeBitmapSafe(bmp);
+    frameCount++;
+    nextRenderAt += renderIntervalMs;
+    // If we fell behind (tab hiccup / GC), realign instead of burst-draining.
+    if (now - nextRenderAt > renderIntervalMs * 2) {
+      nextRenderAt = now + renderIntervalMs;
+    }
+  }
+  requestAnimationFrame(renderLoop);
 }
 
 function drawFrameViaImg(blob) {
   var url = URL.createObjectURL(blob);
   var img = new Image();
   img.onload = function() {
+    // Fallback path keeps old behavior but still reuses buffered pacing.
+    if (window.createImageBitmap) {
+      createImageBitmap(img).then(function(bmp) {
+        pushFrameBitmap(bmp);
+      }).finally(function() {
+        URL.revokeObjectURL(url);
+      });
+      return;
+    }
     ctx.drawImage(img, 0, 0, W, H);
     URL.revokeObjectURL(url);
     frameCount++;
@@ -320,12 +410,47 @@ function clientToGrid(clientX, clientY) {
 var lastDrawGx = -1, lastDrawGy = -1;
 var activePointerId = null;
 var shiftHeldForTouch = false;  // toggled by long-press menu would be ideal; for now use shift key only
+var queuedStrokeEnd = null;
+var queuedStrokeErase = false;
+var strokeFlushTimer = null;
+var strokeFlushIntervalMs = 1000 / 60; // Fixed stroke send cadence independent of 120Hz displays.
+var lastStrokeFlushAt = 0;
 
 window.addEventListener('keydown', function(e) { if (e.key === 'Shift') shiftHeldForTouch = true; });
 window.addEventListener('keyup',   function(e) { if (e.key === 'Shift') shiftHeldForTouch = false; });
 
 function isEraseEvent(e) {
   return !!e.shiftKey || shiftHeldForTouch;
+}
+
+function flushQueuedStroke(force) {
+  if (strokeFlushTimer !== null) {
+    clearTimeout(strokeFlushTimer);
+    strokeFlushTimer = null;
+  }
+  if ((!isDrawing && !force) || selectedBrushId === null || !queuedStrokeEnd) return;
+  var gx = queuedStrokeEnd[0];
+  var gy = queuedStrokeEnd[1];
+  var erase = queuedStrokeErase;
+  if (gx === lastDrawGx && gy === lastDrawGy) return;
+  send({
+    op: 'stroke', id: selectedBrushId,
+    x0: lastDrawGx, y0: lastDrawGy,
+    x1: gx, y1: gy,
+    r: brushSize, erase: erase,
+  });
+  lastDrawGx = gx; lastDrawGy = gy;
+  lastStrokeFlushAt = performance.now();
+}
+
+function scheduleStrokeFlush() {
+  if (strokeFlushTimer !== null) return;
+  var now = performance.now();
+  var elapsed = now - lastStrokeFlushAt;
+  var delay = Math.max(0, strokeFlushIntervalMs - elapsed);
+  strokeFlushTimer = setTimeout(function() {
+    flushQueuedStroke(false);
+  }, delay);
 }
 
 canvas.addEventListener('pointerdown', function(e) {
@@ -337,6 +462,13 @@ canvas.addEventListener('pointerdown', function(e) {
   try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
   activePointerId = e.pointerId;
   isDrawing = true;
+  queuedStrokeEnd = null;
+  queuedStrokeErase = false;
+  if (strokeFlushTimer !== null) {
+    clearTimeout(strokeFlushTimer);
+    strokeFlushTimer = null;
+  }
+  lastStrokeFlushAt = 0;
   var g = clientToGrid(e.clientX, e.clientY);
   lastDrawGx = g[0]; lastDrawGy = g[1];
   send({ op: 'stamp', id: selectedBrushId, x: g[0], y: g[1], r: brushSize, erase: isEraseEvent(e) });
@@ -348,13 +480,9 @@ canvas.addEventListener('pointermove', function(e) {
   e.preventDefault();
   var g = clientToGrid(e.clientX, e.clientY);
   if (g[0] === lastDrawGx && g[1] === lastDrawGy) return;
-  send({
-    op: 'stroke', id: selectedBrushId,
-    x0: lastDrawGx, y0: lastDrawGy,
-    x1: g[0], y1: g[1],
-    r: brushSize, erase: isEraseEvent(e),
-  });
-  lastDrawGx = g[0]; lastDrawGy = g[1];
+  queuedStrokeEnd = g;
+  queuedStrokeErase = isEraseEvent(e);
+  scheduleStrokeFlush();
 });
 
 function endPointer(e) {
@@ -362,7 +490,14 @@ function endPointer(e) {
   if (activePointerId !== null) {
     try { canvas.releasePointerCapture(activePointerId); } catch (_) {}
   }
+  if (queuedStrokeEnd) flushQueuedStroke(true);
   isDrawing = false;
+  queuedStrokeEnd = null;
+  queuedStrokeErase = false;
+  if (strokeFlushTimer !== null) {
+    clearTimeout(strokeFlushTimer);
+    strokeFlushTimer = null;
+  }
   lastDrawGx = -1; lastDrawGy = -1;
   activePointerId = null;
 }
@@ -400,10 +535,34 @@ bindCheck('disturbChk', 'set_param', 'disturbance');
 bindCheck('tintChk', 'set_param', 'show_mask_tint');
 bindRange('nsRange', 'nsVal', 'set_param', 'noise_scale');
 bindRange('ocRange', 'ocVal', 'set_param', 'octaves', function(x) { return x / 100; });
-bindRange('bhRange', 'bhVal', 'set_param', 'half_width', function(x) { return x / 1000; });
+bindRange('bhRange', 'bhVal', 'set_param', 'layer_freq_spread', function(x) { return x / 100; });
 bindRange('zsRange', 'zsVal', 'set_param', 'noise_z_speed', function(x) { return x / 4000; });
 bindRange('thrRange', 'thrVal', 'set_param', 'mask_threshold', function(x) { return x / 100; });
 bindRange('edgeRange', 'edgeVal', 'set_param', 'mask_edge_sharpness');
+
+// ----- Spray controls -----
+bindRange('spAmtRange', 'spAmtVal', 'set_param', 'spray_splatter_amount');
+bindRange('spRadRange', 'spRadVal', 'set_param', 'spray_splatter_radius');
+bindRange('dripThrRange', 'dripThrVal', 'set_param', 'spray_drip_threshold', function(x) { return x / 100; });
+bindRange('dripSpdRange', 'dripSpdVal', 'set_param', 'spray_drip_speed', function(x) { return x / 100; });
+
+var dripGravity = 0;
+function updateDripDirBtns() {
+  var btns = document.querySelectorAll('.dripDirBtn');
+  btns.forEach(function(b) {
+    var d = parseInt(b.getAttribute('data-dir'), 10);
+    if (d === dripGravity) { b.style.borderColor = '#ddd'; b.style.color = '#fff'; }
+    else { b.style.borderColor = '#555'; b.style.color = '#ccc'; }
+  });
+}
+document.querySelectorAll('.dripDirBtn').forEach(function(b) {
+  b.onclick = function() {
+    dripGravity = parseInt(b.getAttribute('data-dir'), 10);
+    updateDripDirBtns();
+    send({ op: 'set_param', name: 'drip_gravity', value: dripGravity });
+  };
+});
+updateDripDirBtns();
 
 document.getElementById('zoomRange').oninput = function(e) {
   zoom = parseFloat(e.target.value);

@@ -64,7 +64,7 @@ Client → server (JSON text):
 | `reseed` | — |
 | `set_param` | `name`, `value` |
 
-Settable params: `alignment`, `rotation_deg`, `noise_scale`, `octaves`, `half_width`, `noise_z_scale`, `noise_z_speed`, `mask_threshold`, `mask_edge_sharpness`, `steps_per_frame`, `disturbance`, `show_mask_tint`, `active`.
+Settable params: `alignment`, `rotation_deg`, `noise_scale`, `octaves`, `layer_freq_spread`, `half_width`, `noise_z_scale`, `noise_z_speed`, `mask_threshold`, `mask_edge_sharpness`, `steps_per_frame`, `disturbance`, `show_mask_tint`, `active`.
 
 Server → client:
 
