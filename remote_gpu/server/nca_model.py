@@ -65,11 +65,12 @@ MAX_DRIPS_PER_BRUSH = 96
 # a fast pointer move (e.g. 600 px between two 60Hz events) would flood the
 # GPU dispatch queue with 600 stamps and stall the sim loop for tens of ms.
 # Each stamp issues ~10 dispatches on MPS, so this cap directly bounds the
-# worst-case step time spent in painting. 14 keeps fast strokes well under
+# worst-case step time spent in painting. 10 keeps fast strokes well under
 # the 33ms / 30fps budget even when system jitter (CPU contention from
-# encoding or other processes) piles on top. The splatter texture masks
-# the slight stamp gaps that appear at very high pointer speed.
-MAX_STAMPS_PER_SEGMENT = 16
+# encoding or other processes) piles on top. Splatter clouds (radius 35)
+# fully cover the gaps between stamps even at very high pointer speed, so
+# the gap-spacing is invisible in practice.
+MAX_STAMPS_PER_SEGMENT = 10
 
 
 @dataclass
@@ -86,12 +87,12 @@ class Params:
     noise_z: float = 0.0
     noise_z_speed: float = 0.0  # >0 → animate
     noise_z_scale: float = 1.0
-    mask_threshold: float = 0.5
+    mask_threshold: float = 0.43
     mask_edge_sharpness: float = 33.0
     # Spray paint feel (matches background_multiPerlin_4move_highResol_cpugpu_rotate.html)
     spray_splatter_amount: int = 10     # # of small jittered dots around main disk
     spray_splatter_radius: float = 27.0 # max offset of splatter dots (in px)
-    spray_drip_threshold: float = 0.40  # wet build-up before a drip can spawn
+    spray_drip_threshold: float = 0.55  # wet build-up before a drip can spawn
     spray_drip_speed: float = 0.40      # 0..1, higher = faster drips
     spray_drip_wobble: float = 0.25     # 0..1, sideways drift while dripping
     spray_drip_min_width: float = 1.0
@@ -553,21 +554,29 @@ class NCASimulator:
 
             for li in picked_local:
                 over_ratio = float(top_vals[li]) / max(thr, 1e-6)
-                # Trimodal length distribution:
-                #   ~85% short        : 3..33 px  (base)
-                #   ~15% long         : 13..70 px (base + 10..37 bonus)
-                #   ~rare runaway     : 73..400 px (base + 70..330 mega-bonus),
-                #                       2% chance AND gated on over_ratio > 4
-                # The runaway tier is gated behind high wetness so it only
-                # triggers when paint has pooled heavily in one spot — i.e.
-                # long-press / repeated overpaint. Quick normal strokes keep
-                # drips in the 3..70 range.
-                drip_len = 3 + int(np.random.random() * 10.0 * over_ratio)
+                # Physical model:
+                #   wetness → drop SIZE (width) → flow DISTANCE (length)
+                # Heavy paint accumulation produces a heavy/fat drop with
+                # gravity & momentum that flows far. A thin 1-px drop has
+                # too little mass to overcome surface tension and stops
+                # quickly. This matches the user's intuition: only after
+                # repeated overpainting do you get long streamers.
+                base_w = 1.0 + np.random.random() * 0.6           # 1.0..1.6
+                wetness_bonus_w = min(3.0, over_ratio * 0.6)      # +0..+3.0
+                drip_w = max(min_w, base_w + wetness_bonus_w)     # ~1.0..4.6
+                # Length grows super-linearly with width. Width^1.4 gives
+                # dramatic separation: thin drops barely move, fat ones
+                # flow many times their own width.
+                width_factor = drip_w ** 1.4                       # ~1..9
+                drip_len = 3 + int(np.random.random() * 4.0 * width_factor)
+                # Lucky long: small extension, scaled by drip mass too.
                 if np.random.random() < 0.15:
-                    drip_len += 10 + int(np.random.random() * 27)
-                if over_ratio > 4.0 and np.random.random() < 0.01:
+                    drip_len += int(np.random.random() * 2.0 * width_factor)
+                # Runaway streamer: requires both heavy wetness AND fat drop.
+                # Only triggers on long-press / heavy overpaint. ~1% of
+                # qualifying drips.
+                if drip_w > 3.2 and over_ratio > 4.0 and np.random.random() < 0.01:
                     drip_len += 70 + int(np.random.random() * 260)
-                drip_w = max(min_w, 1.5 + np.random.random() * 1.5)
                 flat_i = int(top_idx[li])
                 bm.drips.append({
                     "x": int(flat_i % W),
