@@ -38,6 +38,7 @@
   .tag-q1 { background: #3dad6a; color: #fff; }
   .tag-q2 { background: #c9a227; color: #000; }
   .tag-q3 { background: #c44a9c; color: #fff; }
+  .tag-q4 { background: #d67a3d; color: #fff; }
   .tag-e { background: #eee; color: #111; }
 
   .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
@@ -130,8 +131,8 @@
     <div class="panel">
       <h3>Models (priority stack)</h3>
       <p style="font-size:10px;color:#888;line-height:1.4;margin-bottom:10px;">
-        <strong>Four independent 3D Perlin fBm fields</strong> (different seeds + phase + scale).<br>
-        <span class="tag tag-q3">D</span> claims first where its mask is strong, then <span class="tag tag-q2">C</span>, <span class="tag tag-q1">B</span>; leftover → <span class="tag tag-q0">A</span> (base). Non-adjacent models can both influence a pixel via soft weights.
+        <strong>Five independent 3D Perlin fBm fields</strong> (different seeds + phase + scale).<br>
+        <span class="tag tag-q4">E</span> claims first where its mask is strong, then <span class="tag tag-q3">D</span>, <span class="tag tag-q2">C</span>, <span class="tag tag-q1">B</span>; leftover → <span class="tag tag-q0">A</span> (base). Non-adjacent models can both influence a pixel via soft weights.
       </p>
       <div class="drop-zone" id="dropModel0">
         <input type="file" id="fileModel0" accept=".npy"> Drop model A .npy
@@ -149,6 +150,10 @@
         <input type="file" id="fileModel3" accept=".npy"> Drop model D .npy
       </div>
       <div class="model-slot"><span class="tag tag-q3">D</span><span class="name" id="modelName3">None</span></div>
+      <div class="drop-zone" id="dropModel4">
+        <input type="file" id="fileModel4" accept=".npy"> Drop model E .npy
+      </div>
+      <div class="model-slot"><span class="tag tag-q4">E</span><span class="name" id="modelName4">None</span></div>
     </div>
 
     <div class="panel">
@@ -379,7 +384,7 @@ function noiseSpaceRef() {
 }
 
 // ====== State ======
-var BASE_MODELS = 4;
+var BASE_MODELS = 5;
 var baseModels = [null, null, null, null]; // A,B,C,D
 var brushModels = []; // dynamic E/F/G... layers
 var nextBrushModelId = 1;
@@ -428,7 +433,8 @@ var QUARTILE_RGB = [
   [74, 106, 212],   // A
   [61, 173, 106],   // B
   [201, 162, 39],   // C
-  [196, 74, 156]    // D
+  [196, 74, 156],   // D
+  [214, 122, 61]    // E
 ];
 var DRAW_MASK_EPS = 1e-6;
 var brushRadiusPx = 2;
@@ -605,7 +611,7 @@ function fbm3D(perlin, x, y, z, octaves) {
   return norm > 1e-12 ? v / norm : 0;
 }
 
-var perlinLayers = [null, null, null, null];
+var perlinLayers = [null, null, null, null, null];
 var perlinGpu = {
   ready: false,
   canvas: null,
@@ -684,12 +690,13 @@ function rebuildBrushModelListUI() {
   });
 }
 
-/** Per-layer phase so fields are decorrelated (A..D). */
+/** Per-layer phase so fields are decorrelated (A..E). */
 var LAYER_PHASE = [
   [0, 0, 0],
   [41.17, 109.3, 27.8],
   [203.6, 17.2, 91.4],
-  [67.9, 251.1, 156.7]
+  [67.9, 251.1, 156.7],
+  [148.3, 82.7, 204.1]
 ];
 
 function ensurePerlinLayers() {
@@ -785,7 +792,7 @@ function initPerlinGpu() {
     'uniform float uMaskEdgeSharpness;',
     'uniform float uOctaves;',
     'uniform float uRefSpan;',
-    'uniform vec3 uPhase[4];',
+    'uniform vec3 uPhase[5];',
     'vec3 hash33(vec3 p){',
     '  p = fract(p * 0.1031);',
     '  p += dot(p, p.yxz + 33.33);',
@@ -847,8 +854,10 @@ function initPerlinGpu() {
     '  vec2 uvPx = vec2(gl_FragCoord.x - 0.5, uResolution.y - gl_FragCoord.y + 0.5);',
     '  vec2 base = (uvPx / uRefSpan) * uNoiseScale + uOffset;',
     '  float z = uNoiseTime * uNoiseZScale;',
-    '  float a1 = 0.0, a2 = 0.0, a3 = 0.0;',
-    '  for (int l = 1; l < 4; l++) {',
+    // Output the raw sigmoid activations (a1..a4) — the CPU side takes care',
+    // of the priority stacking so we stay within the vec4 fragColor budget.',
+    '  float a1 = 0.0, a2 = 0.0, a3 = 0.0, a4 = 0.0;',
+    '  for (int l = 1; l < 5; l++) {',
     '    float lmul = 1.0 + uLayerFreqSpread * float(l) * 0.28;',
     '    vec3 ph = uPhase[l];',
     '    vec3 p = vec3(base * lmul + ph.xy, z + ph.z * 0.15);',
@@ -857,15 +866,10 @@ function initPerlinGpu() {
     '    float a = sigmoidClaim(m01, uMaskThreshold, uMaskEdgeSharpness);',
     '    if (l == 1) a1 = a;',
     '    else if (l == 2) a2 = a;',
-    '    else a3 = a;',
+    '    else if (l == 3) a3 = a;',
+    '    else a4 = a;',
     '  }',
-    '  float rem3 = 1.0 - a3;',
-    '  float rem23 = rem3 * (1.0 - a2);',
-    '  float w3 = a3;',
-    '  float w2 = rem3 * a2;',
-    '  float w1 = rem23 * a1;',
-    '  float w0 = rem23 * (1.0 - a1);',
-    '  fragColor = vec4(w0, w1, w2, w3);',
+    '  fragColor = vec4(a1, a2, a3, a4);',
     '}'
   ].join('\n');
 
@@ -942,7 +946,8 @@ function computeBaseWeightsGPU() {
       LAYER_PHASE[0][0], LAYER_PHASE[0][1], LAYER_PHASE[0][2],
       LAYER_PHASE[1][0], LAYER_PHASE[1][1], LAYER_PHASE[1][2],
       LAYER_PHASE[2][0], LAYER_PHASE[2][1], LAYER_PHASE[2][2],
-      LAYER_PHASE[3][0], LAYER_PHASE[3][1], LAYER_PHASE[3][2]
+      LAYER_PHASE[3][0], LAYER_PHASE[3][1], LAYER_PHASE[3][2],
+      LAYER_PHASE[4][0], LAYER_PHASE[4][1], LAYER_PHASE[4][2]
     ]));
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.readPixels(0, 0, W, H, gl.RGBA, gl.FLOAT, perlinGpu.readback);
@@ -1075,7 +1080,7 @@ function buildDirectionMap() {
   dirSin = tf.tensor4d(sinData, [1, H, W, 1]);
 }
 
-// ====== Four Perlin fields (A-D) + dynamic brush model layers (E/F/G...) ======
+// ====== Five Perlin fields (A-E) + dynamic brush model layers (F/G/H...) ======
 function buildMaskTensor() {
   ensurePerlinLayers();
   if (quartileMaskTensor) quartileMaskTensor.dispose();
@@ -1096,43 +1101,54 @@ function buildMaskTensor() {
   for (var y = 0; y < H; y++) {
     for (var x = 0; x < W; x++) {
       var idx = y * W + x;
-      var bw0 = 0, bw1 = 0, bw2 = 0, bw3 = 0;
+      // Layer activations a1..a4 (sigmoid of fBm). GPU path streams them in
+      // RGBA; CPU fallback evaluates them directly. Stacking into 5 output
+      // weights (w0..w4) is shared below so the priority math stays in one
+      // place.
+      var a1, a2, a3, a4;
       if (useGpuBase) {
         var gpuRow = (H - 1 - y);
         var gbase = (gpuRow * W + x) * 4;
-        bw0 = baseWeightGpu[gbase];
-        bw1 = baseWeightGpu[gbase + 1];
-        bw2 = baseWeightGpu[gbase + 2];
-        bw3 = baseWeightGpu[gbase + 3];
+        a1 = baseWeightGpu[gbase];
+        a2 = baseWeightGpu[gbase + 1];
+        a3 = baseWeightGpu[gbase + 2];
+        a4 = baseWeightGpu[gbase + 3];
       } else {
         var sx = (x / noiseRef) * noiseScale + noiseOffsetX;
         var sy = (y / noiseRef) * noiseScale + noiseOffsetY;
         var sz = noiseTime * noiseZScale;
-        var raws1 = 0, raws2 = 0, raws3 = 0;
         var lmul1 = 1 + spread * 1 * 0.28;
         var lmul2 = 1 + spread * 2 * 0.28;
         var lmul3 = 1 + spread * 3 * 0.28;
-        var ph1 = LAYER_PHASE[1], ph2 = LAYER_PHASE[2], ph3 = LAYER_PHASE[3];
-        raws1 = fbm3D(perlinLayers[1], sx * lmul1 + ph1[0], sy * lmul1 + ph1[1], sz + ph1[2] * 0.15, oc);
-        raws2 = fbm3D(perlinLayers[2], sx * lmul2 + ph2[0], sy * lmul2 + ph2[1], sz + ph2[2] * 0.15, oc);
-        raws3 = fbm3D(perlinLayers[3], sx * lmul3 + ph3[0], sy * lmul3 + ph3[1], sz + ph3[2] * 0.15, oc);
+        var lmul4 = 1 + spread * 4 * 0.28;
+        var ph1 = LAYER_PHASE[1], ph2 = LAYER_PHASE[2], ph3 = LAYER_PHASE[3], ph4 = LAYER_PHASE[4];
+        var raws1 = fbm3D(perlinLayers[1], sx * lmul1 + ph1[0], sy * lmul1 + ph1[1], sz + ph1[2] * 0.15, oc);
+        var raws2 = fbm3D(perlinLayers[2], sx * lmul2 + ph2[0], sy * lmul2 + ph2[1], sz + ph2[2] * 0.15, oc);
+        var raws3 = fbm3D(perlinLayers[3], sx * lmul3 + ph3[0], sy * lmul3 + ph3[1], sz + ph3[2] * 0.15, oc);
+        var raws4 = fbm3D(perlinLayers[4], sx * lmul4 + ph4[0], sy * lmul4 + ph4[1], sz + ph4[2] * 0.15, oc);
         var m011 = raws1 * 0.5 + 0.5;
         var m012 = raws2 * 0.5 + 0.5;
         var m013 = raws3 * 0.5 + 0.5;
+        var m014 = raws4 * 0.5 + 0.5;
         if (m011 < 0) m011 = 0; if (m011 > 1) m011 = 1;
         if (m012 < 0) m012 = 0; if (m012 > 1) m012 = 1;
         if (m013 < 0) m013 = 0; if (m013 > 1) m013 = 1;
-        var a1 = 1.0 / (1.0 + Math.exp(-(m011 - thr) * sharp));
-        var a2 = 1.0 / (1.0 + Math.exp(-(m012 - thr) * sharp));
-        var a3 = 1.0 / (1.0 + Math.exp(-(m013 - thr) * sharp));
-        var rem3 = 1.0 - a3;
-        var rem23 = rem3 * (1.0 - a2);
-        bw3 = a3;
-        bw2 = rem3 * a2;
-        bw1 = rem23 * a1;
-        bw0 = rem23 * (1.0 - a1);
+        if (m014 < 0) m014 = 0; if (m014 > 1) m014 = 1;
+        a1 = 1.0 / (1.0 + Math.exp(-(m011 - thr) * sharp));
+        a2 = 1.0 / (1.0 + Math.exp(-(m012 - thr) * sharp));
+        a3 = 1.0 / (1.0 + Math.exp(-(m013 - thr) * sharp));
+        a4 = 1.0 / (1.0 + Math.exp(-(m014 - thr) * sharp));
       }
-      cachedNoise01[idx] = 0.25 * (bw0 + bw1 + bw2 + bw3);
+      // Priority stacking: E(w4) tops → D(w3) → C(w2) → B(w1) → A(w0 = rest).
+      var rem4 = 1.0 - a4;
+      var rem34 = rem4 * (1.0 - a3);
+      var rem234 = rem34 * (1.0 - a2);
+      var bw4 = a4;
+      var bw3 = rem4 * a3;
+      var bw2 = rem34 * a2;
+      var bw1 = rem234 * a1;
+      var bw0 = rem234 * (1.0 - a1);
+      cachedNoise01[idx] = 0.2 * (bw0 + bw1 + bw2 + bw3 + bw4);
 
       var remBrush = 1.0;
       if (brushN > 0) {
@@ -1160,21 +1176,24 @@ function buildMaskTensor() {
       var w1f = remBrush * bw1;
       var w2f = remBrush * bw2;
       var w3f = remBrush * bw3;
+      var w4f = remBrush * bw4;
       data[base] = w0f;
       data[base + 1] = w1f;
       data[base + 2] = w2f;
       data[base + 3] = w3f;
+      data[base + 4] = w4f;
 
       var dom = 0;
       var domW = w0f;
       if (w1f > domW) { dom = 1; domW = w1f; }
       if (w2f > domW) { dom = 2; domW = w2f; }
       if (w3f > domW) { dom = 3; domW = w3f; }
+      if (w4f > domW) { dom = 4; domW = w4f; }
 
       var rr = 0, gg = 0, bb = 0;
-      rr += w0f * QUARTILE_RGB[0][0] + w1f * QUARTILE_RGB[1][0] + w2f * QUARTILE_RGB[2][0] + w3f * QUARTILE_RGB[3][0];
-      gg += w0f * QUARTILE_RGB[0][1] + w1f * QUARTILE_RGB[1][1] + w2f * QUARTILE_RGB[2][1] + w3f * QUARTILE_RGB[3][1];
-      bb += w0f * QUARTILE_RGB[0][2] + w1f * QUARTILE_RGB[1][2] + w2f * QUARTILE_RGB[2][2] + w3f * QUARTILE_RGB[3][2];
+      rr += w0f * QUARTILE_RGB[0][0] + w1f * QUARTILE_RGB[1][0] + w2f * QUARTILE_RGB[2][0] + w3f * QUARTILE_RGB[3][0] + w4f * QUARTILE_RGB[4][0];
+      gg += w0f * QUARTILE_RGB[0][1] + w1f * QUARTILE_RGB[1][1] + w2f * QUARTILE_RGB[2][1] + w3f * QUARTILE_RGB[3][1] + w4f * QUARTILE_RGB[4][1];
+      bb += w0f * QUARTILE_RGB[0][2] + w1f * QUARTILE_RGB[1][2] + w2f * QUARTILE_RGB[2][2] + w3f * QUARTILE_RGB[3][2] + w4f * QUARTILE_RGB[4][2];
 
       for (var kk = 0; kk < brushN; kk++) {
         var wk = brushWeights ? brushWeights[kk] : 0;
@@ -1929,7 +1948,7 @@ function handleBaseModelFile(file, slotIndex) {
     try {
       var name = file.name.replace('.npy', '');
       var m = loadModelFromNpy(e.target.result, name);
-      var labels = ['A', 'B', 'C', 'D'];
+      var labels = ['A', 'B', 'C', 'D', 'E'];
       disposeModel(baseModels[slotIndex]);
       baseModels[slotIndex] = m;
       document.getElementById('modelName' + slotIndex).textContent = name;

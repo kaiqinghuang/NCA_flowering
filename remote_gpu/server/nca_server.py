@@ -29,6 +29,7 @@ import asyncio
 import io
 import json
 import os
+import socket as _socket
 import threading
 import time
 from collections import deque
@@ -53,6 +54,12 @@ W = int(os.environ.get("NCA_W", "960"))
 TARGET_FPS = float(os.environ.get("NCA_FPS", "30"))
 TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "60"))
 WEBP_QUALITY = int(os.environ.get("NCA_WEBP_Q", "92"))
+# Adaptive-quality bounds. The encoder starts at WEBP_QUALITY and drops toward
+# ADAPTIVE_MIN_Q when the broadcast loop detects per-client send backpressure
+# (frames piling up on slow networks). Quality recovers automatically once the
+# network calms down. Override via env if you want wider/narrower range.
+ADAPTIVE_MIN_Q = int(os.environ.get("NCA_ADAPTIVE_MIN_Q", "68"))
+ADAPTIVE_MAX_Q = int(os.environ.get("NCA_ADAPTIVE_MAX_Q", str(WEBP_QUALITY)))
 PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
 # Cap how many paint events one step can drain. Lower value = smoother
 # step times during fast painting (excess events queue up and get processed
@@ -112,6 +119,104 @@ clients_lock = asyncio.Lock()
 paint_queue = deque(maxlen=PAINT_QUEUE_MAX)
 paint_queue_lock = threading.Lock()
 _drip_tick = 0
+
+
+# ---- Adaptive quality (responds to per-client send backpressure) ----
+# Broadcast loop counts how often a new frame has to bump an un-sent frame
+# off a client's outbound queue ("drop"). A sustained drop ratio means the
+# network can't keep up with current bitrate, so we step JPEG quality down
+# (~25-40% smaller frames per -8 quality). Quality recovers after several
+# calm seconds. This is the main defence against WAN/WiFi bandwidth swings.
+_aq: dict = {
+    "current_q": max(ADAPTIVE_MIN_Q, min(ADAPTIVE_MAX_Q, WEBP_QUALITY)),
+    "sent": 0,
+    "dropped": 0,
+    "healthy_ticks": 0,
+    "last_tick": time.perf_counter(),
+    "interval_s": 1.0,
+    "drop_ratio_threshold": 0.05,
+    "step_down": 8,
+    "step_up": 3,
+    "recover_ticks": 3,
+}
+
+
+def _aq_record(sent: int = 0, dropped: int = 0):
+    # Single-integer ops under GIL → safe w/o a dedicated lock.
+    if sent:
+        _aq["sent"] += sent
+    if dropped:
+        _aq["dropped"] += dropped
+
+
+def _aq_tick():
+    now = time.perf_counter()
+    if now - _aq["last_tick"] < _aq["interval_s"]:
+        return
+    sent = _aq["sent"]
+    dropped = _aq["dropped"]
+    _aq["sent"] = 0
+    _aq["dropped"] = 0
+    _aq["last_tick"] = now
+    total = sent + dropped
+    if total >= 5 and dropped / total > _aq["drop_ratio_threshold"]:
+        new_q = max(ADAPTIVE_MIN_Q, _aq["current_q"] - _aq["step_down"])
+        if new_q != _aq["current_q"]:
+            print(f"[aq] ↓ jpeg {_aq['current_q']}→{new_q}  (drop {dropped}/{total})")
+        _aq["current_q"] = new_q
+        _aq["healthy_ticks"] = 0
+        return
+    if dropped == 0:
+        _aq["healthy_ticks"] += 1
+        if (_aq["healthy_ticks"] >= _aq["recover_ticks"]
+                and _aq["current_q"] < ADAPTIVE_MAX_Q):
+            new_q = min(ADAPTIVE_MAX_Q, _aq["current_q"] + _aq["step_up"])
+            print(f"[aq] ↑ jpeg {_aq['current_q']}→{new_q}")
+            _aq["current_q"] = new_q
+            _aq["healthy_ticks"] = 0
+
+
+def _try_set_tcp_nodelay(ws: WebSocket) -> bool:
+    """Best-effort: disable Nagle on the underlying TCP socket.
+
+    Without TCP_NODELAY the kernel may hold a partial segment for up to ~40ms
+    waiting for more data to coalesce — catastrophic for 30fps video where
+    every frame is a latency-critical message. Starlette/uvicorn doesn't
+    expose the socket officially, so we probe common attribute paths and
+    fall back silently if none match (safe; only latency cost if it fails).
+    """
+    try:
+        candidates = []
+        send = getattr(ws, "_send", None)
+        if send is not None:
+            holder = getattr(send, "__self__", None)
+            if holder is not None:
+                candidates.append(holder)
+        for attr in ("_transport", "transport", "_protocol"):
+            v = getattr(ws, attr, None)
+            if v is not None:
+                candidates.append(v)
+        for c in candidates:
+            obj = c
+            for _ in range(4):
+                sock = None
+                if hasattr(obj, "get_extra_info"):
+                    try:
+                        sock = obj.get_extra_info("socket")
+                    except Exception:
+                        sock = None
+                if sock is not None:
+                    try:
+                        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+                        return True
+                    except Exception:
+                        return False
+                obj = getattr(obj, "transport", None)
+                if obj is None:
+                    break
+    except Exception:
+        pass
+    return False
 
 
 def list_available_models() -> list[str]:
@@ -208,6 +313,8 @@ def _apply_param(name: str, value):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    nodelay_ok = _try_set_tcp_nodelay(ws)
+    print(f"[ws] client connected tcp_nodelay={'on' if nodelay_ok else 'unset'}")
     client_conn = ClientConnection(ws)
     async with clients_lock:
         clients.add(client_conn)
@@ -320,8 +427,10 @@ def _render_and_encode_blocking() -> bytes:
         rgb = rgb * 0.76 + tint_snap * 0.24
     rgb_np = rgb.clamp(0, 1).permute(1, 2, 0).mul(255).to(torch.uint8).cpu().numpy()
     buf = io.BytesIO()
-    # JPEG encoding is 5-10x faster than WebP and reduces Python GIL blocking significantly
-    Image.fromarray(rgb_np, mode="RGB").save(buf, format="JPEG", quality=WEBP_QUALITY)
+    # JPEG encoding is 5-10x faster than WebP and reduces Python GIL blocking significantly.
+    # Quality is managed by the adaptive-quality controller (see _aq_tick).
+    quality = int(_aq["current_q"])
+    Image.fromarray(rgb_np, mode="RGB").save(buf, format="JPEG", quality=quality)
     payload = buf.getvalue()
     _perf["encode_ms"] += (time.perf_counter() - t0) * 1000.0
     _perf["frames"] += 1
@@ -345,7 +454,8 @@ async def perf_loop():
         print(
             f"[perf] sps={sps:5.1f}  fps={fps:4.1f}  step_avg={avg_step:5.2f}ms  "
             f"enc_avg={avg_enc:5.2f}ms  paint={_perf['paint_applied']} "
-            f"drop={_perf['paint_dropped']} q={queued} clients={len(clients)}"
+            f"drop={_perf['paint_dropped']} q={queued} clients={len(clients)} "
+            f"jpegQ={_aq['current_q']}"
         )
         _perf["steps"] = 0
         _perf["frames"] = 0
@@ -385,8 +495,12 @@ async def broadcast_loop():
                     for client in clients:
                         try:
                             client.queue.put_nowait(payload)
+                            _aq_record(sent=1)
                         except asyncio.QueueFull:
-                            # Slow client: drop stale frame, keep freshest one.
+                            # Slow client: prior frame is still unsent → that's
+                            # a network-backpressure signal. Count it, drop the
+                            # stale frame, and keep the freshest one.
+                            _aq_record(dropped=1)
                             try:
                                 _ = client.queue.get_nowait()
                             except asyncio.QueueEmpty:
@@ -397,6 +511,7 @@ async def broadcast_loop():
                                 pass
             except Exception as e:
                 print(f"[broadcast] encode/send failed: {e}")
+        _aq_tick()
         next_t += interval
         delay = next_t - time.perf_counter()
         if delay > 0:
