@@ -55,7 +55,27 @@ class KinectSource:
 
     # -- internal --
 
+    def _apply_pykinect_compat_shims(self):
+        """Patch legacy PyKinect2 assumptions for modern Python/Numpy.
+
+        Upstream PyKinect2 still references:
+        - time.clock()  (removed in Python 3.8+)
+        - numpy.object  (removed in NumPy 2.x)
+        """
+        # PyKinectRuntime uses time.clock() in its startup path.
+        if not hasattr(time, "clock"):
+            time.clock = time.perf_counter  # type: ignore[attr-defined]
+        try:
+            import numpy as np
+            if not hasattr(np, "object"):
+                np.object = object  # type: ignore[attr-defined]
+        except Exception:
+            # If numpy isn't importable here, PyKinect2 import will still
+            # raise below and we'll surface that error as before.
+            pass
+
     def _run(self):
+        self._apply_pykinect_compat_shims()
         try:
             from pykinect2 import PyKinectV2  # noqa: F401
             from pykinect2.PyKinectV2 import (
