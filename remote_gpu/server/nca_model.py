@@ -208,7 +208,9 @@ class NCASimulator:
         layers: list[Perlin3D] = []
         for i in range(BASE_MODELS):
             s = int(rng.integers(0, 2**32, dtype=np.uint32))
-            s ^= int(np.uint32(i * 0x9E3779B9))
+            # NumPy 2.x no longer silently wraps out-of-range Python ints to uint32.
+            # Do explicit 32-bit masking so behavior is stable across NumPy versions.
+            s ^= ((i * 0x9E3779B9) & 0xFFFFFFFF)
             layers.append(Perlin3D(s))
         return layers
 
