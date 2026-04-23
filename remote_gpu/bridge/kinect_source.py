@@ -49,6 +49,7 @@ class KinectSource:
         self.started_ok = False  # set True once the Kinect runtime is up
         self._debug_jpeg: Optional[bytes] = None
         self._debug_lock = threading.Lock()
+        self._debug_frame_idx = 0
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True, name="kinect")
@@ -230,6 +231,19 @@ class KinectSource:
             arr = np.asarray(flat_color_frame, dtype=np.uint8).reshape(color_shape)
             bgr = arr[:, :, :3]  # BGRA -> BGR
             small = cv2.resize(bgr, (640, 360), interpolation=cv2.INTER_AREA)
+            self._debug_frame_idx += 1
+            stamp = f"debug#{self._debug_frame_idx}  t={now:.3f}"
+            cv2.rectangle(small, (8, 8), (320, 36), (0, 0, 0), -1)
+            cv2.putText(
+                small,
+                stamp,
+                (12, 29),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (40, 255, 120),
+                1,
+                cv2.LINE_AA,
+            )
             ok, enc = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
             if ok:
                 with self._debug_lock:

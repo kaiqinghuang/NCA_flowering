@@ -271,5 +271,20 @@ async def root():
 async def debug_color_jpg():
     jpeg = kinect.get_debug_jpeg()
     if not jpeg:
-        return Response(status_code=404)
-    return Response(content=jpeg, media_type="image/jpeg")
+        return Response(
+            status_code=404,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
