@@ -34,14 +34,54 @@
            image-rendering: -moz-crisp-edges; image-rendering: crisp-edges;
            background: #000; cursor: crosshair;
            touch-action: none; -ms-touch-action: none;
-           -webkit-user-select: none; user-select: none; }
-  canvas:fullscreen { border: none; border-radius: 0; background: #000;
-                      width: 1920px; height: 1080px; }
-  canvas:-webkit-full-screen { border: none; border-radius: 0; background: #000;
-                                width: 1920px; height: 1080px; }
+           -webkit-user-select: none; user-select: none; display: block; }
+  .canvas-wrap { position: relative; display: inline-block; line-height: 0; }
+  #overlayCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+                   pointer-events: none; background: transparent; border: none;
+                   image-rendering: pixelated; image-rendering: -moz-crisp-edges;
+                   image-rendering: crisp-edges; }
+  .canvas-wrap:fullscreen, .canvas-wrap:-webkit-full-screen {
+    display: flex !important; align-items: center; justify-content: center;
+    width: 100vw; height: 100vh; background: #000; padding: 0;
+  }
+  .canvas-wrap:fullscreen #canvas,
+  .canvas-wrap:-webkit-full-screen #canvas {
+    width: 1920px; height: 1080px; position: relative;
+    border: none; border-radius: 0;
+  }
+  .canvas-wrap:fullscreen #overlayCanvas,
+  .canvas-wrap:-webkit-full-screen #overlayCanvas {
+    width: 1920px; height: 1080px; position: absolute;
+    left: 50%; top: 50%; transform: translate(-50%, -50%);
+  }
+
+  /* Kinect calibration overlay — sits above both canvases but below fullscreen UI */
+  #calOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+                pointer-events: none; font-family: monospace; z-index: 10; }
+  #calOverlay.hidden { display: none; }
+  .cal-target { position: absolute; width: 28px; height: 28px;
+                border: 2px solid rgba(255,255,255,0.9); border-radius: 50%;
+                transform: translate(-50%, -50%);
+                box-shadow: 0 0 0 1px rgba(0,0,0,0.5) inset; }
+  .cal-target.active { border-color: #ff3; background: rgba(255,240,80,0.25);
+                       box-shadow: 0 0 16px rgba(255,240,80,0.9); }
+  .cal-target.done { border-color: #4f8; background: rgba(80,240,140,0.35); }
+  .cal-instruct { position: absolute; left: 50%; top: 50%;
+                  transform: translate(-50%, -50%);
+                  background: rgba(0,0,0,0.85); color: #eee;
+                  padding: 12px 16px; border-radius: 6px;
+                  font-size: 13px; max-width: 62%; text-align: center;
+                  border: 1px solid #555; line-height: 1.5; }
+
   .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
   #info { font-size: 11px; color: #666; margin-top: 8px; }
   .help { font-size: 11px; color: #666; margin-top: 6px; }
+
+  /* Kinect sidebar status */
+  .kinect-status { font-size: 11px; color: #888; }
+  .kinect-status.ok { color: #7c7; }
+  .kinect-status.warn { color: #dd6; }
+  .kinect-status.err { color: #e77; }
 </style>
 </head>
 <body>
@@ -97,6 +137,22 @@
       <button class="btn" id="clearBtn">Clear canvas</button>
       <button class="btn" id="reseedBtn">New noise seed</button>
       <button class="btn" id="fsBtn">Fullscreen 1920×1080</button>
+    </div>
+
+    <div class="panel">
+      <h3>Kinect</h3>
+      <div class="row"><span id="kinectStatus" class="kinect-status">Not connected</span></div>
+      <div class="row" style="gap:6px;">
+        <button class="btn" id="calBtn" style="flex:1;">Calibrate</button>
+        <button class="btn" id="calCancelBtn" style="flex:1;" disabled>Cancel</button>
+      </div>
+      <div class="row" style="gap:6px;">
+        <button class="btn" id="calResetBtn" style="flex:1;">Reset calibration</button>
+      </div>
+      <div class="help" style="margin-top:6px;">
+        Pinch (thumb + index) to paint with the selected brush.
+        Calibration: pinch &amp; hold over each highlighted corner for ~½ second.
+      </div>
     </div>
 
     <div class="panel">
@@ -165,11 +221,16 @@
   </div>
 
   <div class="canvas-area">
-    <canvas id="canvas"></canvas>
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="canvas"></canvas>
+      <canvas id="overlayCanvas"></canvas>
+      <div id="calOverlay" class="hidden"></div>
+    </div>
     <div id="info">no frames yet</div>
     <div class="help">
       Hold left button and drag to paint with the selected brush model.
       <strong>Shift</strong> + drag erases.
+      Kinect pinch (when connected) paints with the active brush as well.
     </div>
   </div>
 </div>
@@ -616,14 +677,16 @@ document.getElementById('clearBrushBtn').onclick = function() {
 };
 
 // ----- Fullscreen 1920×1080 (pure 2× nearest-neighbor upscale from 960×540) -----
-// `image-rendering: pixelated` on the canvas guarantees the browser uses
-// nearest-neighbor sampling, so a single source pixel becomes exactly a 2×2
-// block at the 1920×1080 target. No blending, no smoothing.
+// The wrapper div (canvas + overlay + calibration layer) goes fullscreen so
+// that Kinect cursor / calibration markers stay aligned with the paint canvas.
+// `image-rendering: pixelated` on each canvas guarantees nearest-neighbor
+// sampling, so a 960×540 source pixel becomes exactly a 2×2 block at 1920×1080.
+var canvasWrapEl = document.getElementById('canvasWrap');
 document.getElementById('fsBtn').onclick = function() {
   var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
   if (!fsEl) {
-    var req = canvas.requestFullscreen || canvas.webkitRequestFullscreen;
-    if (req) req.call(canvas);
+    var req = canvasWrapEl.requestFullscreen || canvasWrapEl.webkitRequestFullscreen;
+    if (req) req.call(canvasWrapEl);
   } else {
     var exit = document.exitFullscreen || document.webkitExitFullscreen;
     if (exit) exit.call(document);
@@ -632,10 +695,8 @@ document.getElementById('fsBtn').onclick = function() {
 
 function onFullscreenChange() {
   var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-  if (fsEl === canvas) {
-    // Fixed 1920×1080 CSS size. CSS rules above pin it to this even though
-    // the element is the fullscreen root, so the canvas is centered on a
-    // black background when the physical screen is larger.
+  if (fsEl === canvasWrapEl) {
+    // CSS pins both canvases to 1920×1080 while the wrapper fills the screen.
     canvas.style.width = '1920px';
     canvas.style.height = '1080px';
   } else {
@@ -648,6 +709,7 @@ document.addEventListener('webkitfullscreenchange', onFullscreenChange);
 function applyZoom() {
   canvas.style.width = Math.round(W * zoom) + 'px';
   canvas.style.height = Math.round(H * zoom) + 'px';
+  resizeOverlayCanvas();
 }
 
 // ----- FPS / bandwidth sampler -----
@@ -662,6 +724,297 @@ setInterval(function() {
 }, 1000);
 
 connect();
+
+// =========================================================================
+// Kinect bridge (local WebSocket) — hand cursor overlay + pinch-driven paint
+// =========================================================================
+// The bridge runs locally (Windows laptop with Kinect). It feeds us a stream
+// of `{op:"hand", cx, cy, pinch, tracked, cal_*}` messages at ~30Hz after a
+// one-time 4-point calibration. While calibration is in progress we suppress
+// painting so the user can place their hand at each corner without drawing.
+// Mouse input keeps working in parallel; nothing below touches the mouse path.
+
+var BRIDGE_URL = (function() {
+  var p = new URLSearchParams(location.search).get('bridge');
+  if (p) return p;
+  return 'ws://' + (location.hostname || 'localhost') + ':7000/ws';
+})();
+
+var bridgeWs = null;
+var bridgeReady = false;
+var calibrationMode = false;
+var bridgeStatusEl = document.getElementById('kinectStatus');
+var calBtn = document.getElementById('calBtn');
+var calCancelBtn = document.getElementById('calCancelBtn');
+var calResetBtn = document.getElementById('calResetBtn');
+var calOverlayEl = document.getElementById('calOverlay');
+
+function setBridgeStatus(text, cls) {
+  if (!bridgeStatusEl) return;
+  bridgeStatusEl.textContent = text;
+  bridgeStatusEl.className = 'kinect-status ' + (cls || '');
+}
+
+function sendBridge(obj) {
+  if (bridgeReady && bridgeWs) {
+    try { bridgeWs.send(JSON.stringify(obj)); } catch (_) {}
+  }
+}
+
+function connectBridge() {
+  setBridgeStatus('Connecting to bridge…', '');
+  try {
+    bridgeWs = new WebSocket(BRIDGE_URL);
+  } catch (err) {
+    setBridgeStatus('Bridge URL invalid', 'err');
+    return;
+  }
+  bridgeWs.onopen = function() {
+    bridgeReady = true;
+    setBridgeStatus('Bridge connected', 'ok');
+  };
+  bridgeWs.onerror = function() {
+    setBridgeStatus('Bridge error', 'err');
+  };
+  bridgeWs.onclose = function() {
+    bridgeReady = false;
+    setBridgeStatus('Bridge disconnected — retry in 3s', 'warn');
+    clearOverlay();
+    hideCalibrationOverlay();
+    calibrationMode = false;
+    setTimeout(connectBridge, 3000);
+  };
+  bridgeWs.onmessage = function(ev) {
+    var msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handleBridgeMsg(msg);
+  };
+}
+
+function handleBridgeMsg(m) {
+  var op = m.op;
+  if (op === 'hello') {
+    var kinectOk = !!m.kinect_ok;
+    setBridgeStatus(kinectOk
+      ? ('Bridge connected — Kinect OK' + (m.cal_ready ? ', calibrated' : ', NOT calibrated'))
+      : 'Bridge connected — Kinect not found',
+      kinectOk ? 'ok' : 'warn');
+  } else if (op === 'hand') {
+    onHandFrame(m);
+  } else if (op === 'cal_started') {
+    calibrationMode = true;
+    showCalibrationOverlay();
+    calCancelBtn.disabled = false;
+    calBtn.disabled = true;
+  } else if (op === 'cal_cancelled' || op === 'cal_reset') {
+    calibrationMode = false;
+    hideCalibrationOverlay();
+    calCancelBtn.disabled = true;
+    calBtn.disabled = false;
+  }
+}
+
+// --- Pinch → paint (reuses the remote server's stamp/stroke protocol) ---
+var pinchActive = false;
+var pinchLastGx = -1, pinchLastGy = -1;
+var pinchQueuedEnd = null;
+var pinchFlushTimer = null;
+var pinchFlushIntervalMs = 1000 / 60;
+var pinchLastFlushAt = 0;
+
+function startPinch(gx, gy) {
+  if (selectedBrushId === null) return;
+  pinchActive = true;
+  pinchLastGx = gx; pinchLastGy = gy;
+  pinchQueuedEnd = null;
+  pinchLastFlushAt = 0;
+  send({ op: 'stamp', id: selectedBrushId, x: gx, y: gy, r: brushSize, erase: false });
+}
+
+function continuePinch(gx, gy) {
+  if (!pinchActive || selectedBrushId === null) return;
+  if (gx === pinchLastGx && gy === pinchLastGy) return;
+  pinchQueuedEnd = [gx, gy];
+  if (pinchFlushTimer !== null) return;
+  var now = performance.now();
+  var delay = Math.max(0, pinchFlushIntervalMs - (now - pinchLastFlushAt));
+  pinchFlushTimer = setTimeout(flushPinchStroke, delay);
+}
+
+function flushPinchStroke() {
+  pinchFlushTimer = null;
+  if (!pinchActive || !pinchQueuedEnd || selectedBrushId === null) return;
+  var gx = pinchQueuedEnd[0], gy = pinchQueuedEnd[1];
+  if (gx !== pinchLastGx || gy !== pinchLastGy) {
+    send({
+      op: 'stroke', id: selectedBrushId,
+      x0: pinchLastGx, y0: pinchLastGy, x1: gx, y1: gy,
+      r: brushSize, erase: false,
+    });
+  }
+  pinchLastGx = gx; pinchLastGy = gy;
+  pinchLastFlushAt = performance.now();
+  pinchQueuedEnd = null;
+}
+
+function endPinch() {
+  if (pinchFlushTimer !== null) { clearTimeout(pinchFlushTimer); pinchFlushTimer = null; }
+  if (pinchQueuedEnd) flushPinchStroke();
+  pinchActive = false;
+  pinchLastGx = -1; pinchLastGy = -1;
+  pinchQueuedEnd = null;
+}
+
+function onHandFrame(m) {
+  renderOverlay(m);
+  if (calibrationMode) {
+    updateCalibrationUI(m);
+    if (pinchActive) endPinch();
+    return;
+  }
+  var haveCanvasPos = (typeof m.cx === 'number' && typeof m.cy === 'number');
+  if (!haveCanvasPos || !m.tracked) {
+    if (pinchActive) endPinch();
+    return;
+  }
+  var gx = Math.max(0, Math.min(W - 1, Math.round(m.cx)));
+  var gy = Math.max(0, Math.min(H - 1, Math.round(m.cy)));
+  if (m.pinch) {
+    if (!pinchActive) startPinch(gx, gy);
+    else continuePinch(gx, gy);
+  } else if (pinchActive) {
+    endPinch();
+  }
+}
+
+// --- Overlay canvas (white ring / red dot cursor) ---
+var overlayCanvas = document.getElementById('overlayCanvas');
+var overlayCtx = overlayCanvas ? overlayCanvas.getContext('2d') : null;
+
+function resizeOverlayCanvas() {
+  if (!overlayCanvas) return;
+  if (overlayCanvas.width !== W) overlayCanvas.width = W;
+  if (overlayCanvas.height !== H) overlayCanvas.height = H;
+}
+
+function clearOverlay() {
+  if (overlayCtx) overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+}
+
+function renderOverlay(m) {
+  if (!overlayCtx) return;
+  resizeOverlayCanvas();
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  if (!m || typeof m.cx !== 'number' || typeof m.cy !== 'number') return;
+  if (!m.tracked || !m.cal_ready) return;
+  var r = Math.max(5, Math.round(brushSize * 1.8));
+  overlayCtx.save();
+  overlayCtx.lineWidth = 1.5;
+  if (m.pinch) {
+    overlayCtx.fillStyle = 'rgba(255,60,60,0.75)';
+    overlayCtx.strokeStyle = 'rgba(255,255,255,0.95)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, r, 0, Math.PI * 2);
+    overlayCtx.fill(); overlayCtx.stroke();
+  } else {
+    overlayCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, r, 0, Math.PI * 2);
+    overlayCtx.stroke();
+    overlayCtx.fillStyle = 'rgba(255,255,255,0.9)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, 1.5, 0, Math.PI * 2);
+    overlayCtx.fill();
+  }
+  overlayCtx.restore();
+}
+
+// --- Calibration wizard UI ---
+// Markers sit exactly on the 4 canvas corners (centered, so half of each
+// marker extends outside the canvas). The server also uses corner (0,0)…(W,H)
+// as homography destinations, so "hand where the marker is shown" ↔ "that
+// canvas corner" is a one-to-one mapping.
+var CAL_CORNER_PCT = [
+  [0.0, 0.0],   // TL
+  [1.0, 0.0],   // TR
+  [1.0, 1.0],   // BR
+  [0.0, 1.0],   // BL
+];
+var CAL_LABELS = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+
+function showCalibrationOverlay() {
+  if (!calOverlayEl) return;
+  calOverlayEl.innerHTML = '';
+  for (var i = 0; i < 4; i++) {
+    var t = document.createElement('div');
+    t.className = 'cal-target';
+    t.setAttribute('data-idx', String(i));
+    t.style.left = (CAL_CORNER_PCT[i][0] * 100) + '%';
+    t.style.top  = (CAL_CORNER_PCT[i][1] * 100) + '%';
+    calOverlayEl.appendChild(t);
+  }
+  var msg = document.createElement('div');
+  msg.className = 'cal-instruct';
+  msg.id = 'calInstruct';
+  msg.innerHTML = 'Move your right hand above the highlighted corner, '
+                + '<b>pinch &amp; hold</b> for ½ second, then release.';
+  calOverlayEl.appendChild(msg);
+  calOverlayEl.classList.remove('hidden');
+}
+
+function hideCalibrationOverlay() {
+  if (!calOverlayEl) return;
+  calOverlayEl.classList.add('hidden');
+  calOverlayEl.innerHTML = '';
+  calCancelBtn.disabled = true;
+  calBtn.disabled = false;
+}
+
+function updateCalibrationUI(m) {
+  var cs = m.cal_status || {};
+  var activeIdx = (typeof cs.corner === 'number') ? cs.corner : 0;
+  var targets = calOverlayEl.querySelectorAll('.cal-target');
+  for (var i = 0; i < targets.length; i++) {
+    targets[i].classList.remove('active', 'done');
+    if (i < activeIdx) targets[i].classList.add('done');
+    else if (i === activeIdx) targets[i].classList.add('active');
+  }
+  var msg = document.getElementById('calInstruct');
+  if (!msg) return;
+  var label = CAL_LABELS[activeIdx] || '?';
+  switch (cs.state) {
+    case 'sampling':
+      msg.innerHTML = 'Hold… ' + (cs.samples || 0) + ' / ' + (cs.need || 8) + ' samples';
+      break;
+    case 'waiting':
+      msg.innerHTML = 'Target: <b>' + label + '</b>. Pinch and hold over this corner.';
+      break;
+    case 'corner_done':
+      msg.innerHTML = 'Nice. Now target: <b>' + label + '</b>.';
+      break;
+    case 'retry':
+      msg.innerHTML = 'Too shaky — please try again. Target: <b>' + label + '</b>.';
+      break;
+    case 'done':
+      msg.innerHTML = 'Calibration saved!';
+      setTimeout(hideCalibrationOverlay, 800);
+      break;
+    case 'failed':
+      msg.innerHTML = 'Calibration failed: ' + (cs.reason || 'unknown');
+      setTimeout(hideCalibrationOverlay, 2500);
+      break;
+    default:
+      msg.innerHTML = 'Target: <b>' + label + '</b>. Pinch &amp; hold to sample.';
+  }
+}
+
+// --- Wire up buttons ---
+if (calBtn) calBtn.onclick = function() { sendBridge({ op: 'start_calibration' }); };
+if (calCancelBtn) calCancelBtn.onclick = function() { sendBridge({ op: 'cancel_calibration' }); };
+if (calResetBtn) calResetBtn.onclick = function() {
+  if (confirm('Clear stored Kinect calibration?')) sendBridge({ op: 'reset_calibration' });
+};
+
+// Initial overlay sizing + kick off bridge connection.
+resizeOverlayCanvas();
+connectBridge();
 </script>
 </body>
 </html>

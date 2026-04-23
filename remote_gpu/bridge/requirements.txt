@@ -1,0 +1,8 @@
+# Kinect v2 bridge (Windows only — PyKinect2 is Win-exclusive).
+pykinect2>=0.1.0
+comtypes>=1.2.0
+numpy>=1.26
+opencv-python>=4.9
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12.0
