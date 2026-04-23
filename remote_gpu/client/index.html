@@ -82,6 +82,17 @@
   .kinect-status.ok { color: #7c7; }
   .kinect-status.warn { color: #dd6; }
   .kinect-status.err { color: #e77; }
+  .k-debug-wrap { margin-top: 8px; border: 1px solid #3a3a3a; border-radius: 6px;
+                  padding: 6px; background: #141414; }
+  .k-debug-wrap.hidden { display: none; }
+  .k-debug-stage { position: relative; width: 100%; aspect-ratio: 16 / 9;
+                   background: #000; border-radius: 4px; overflow: hidden; }
+  #kinectDebugImg, #kinectDebugCanvas {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  }
+  #kinectDebugImg { object-fit: cover; image-rendering: auto; }
+  #kinectDebugCanvas { pointer-events: none; }
+  #kinectDebugStats { margin-top: 6px; font-size: 11px; color: #aaa; line-height: 1.35; }
 </style>
 </head>
 <body>
@@ -152,6 +163,16 @@
       <div class="help" style="margin-top:6px;">
         Pinch (thumb + index) to paint with the selected brush.
         Calibration: pinch &amp; hold over each highlighted corner for ~½ second.
+      </div>
+      <div class="row" style="gap:6px; margin-top:8px;">
+        <button class="btn" id="kDebugToggleBtn" style="flex:1;">Debug View: Off</button>
+      </div>
+      <div id="kDebugWrap" class="k-debug-wrap hidden">
+        <div class="k-debug-stage">
+          <img id="kinectDebugImg" alt="kinect debug stream">
+          <canvas id="kinectDebugCanvas" width="320" height="180"></canvas>
+        </div>
+        <div id="kinectDebugStats">tracked: - | confident: - | pinch: - | dist: -</div>
       </div>
     </div>
 
@@ -748,6 +769,42 @@ var calBtn = document.getElementById('calBtn');
 var calCancelBtn = document.getElementById('calCancelBtn');
 var calResetBtn = document.getElementById('calResetBtn');
 var calOverlayEl = document.getElementById('calOverlay');
+var kDebugToggleBtn = document.getElementById('kDebugToggleBtn');
+var kDebugWrap = document.getElementById('kDebugWrap');
+var kinectDebugImg = document.getElementById('kinectDebugImg');
+var kinectDebugCanvas = document.getElementById('kinectDebugCanvas');
+var kinectDebugCtx = kinectDebugCanvas ? kinectDebugCanvas.getContext('2d') : null;
+var kinectDebugStats = document.getElementById('kinectDebugStats');
+var kDebugEnabled = false;
+var kDebugTimer = null;
+
+function bridgeToHttpRoot(wsUrl) {
+  if (!wsUrl || typeof wsUrl !== 'string') return '';
+  if (wsUrl.indexOf('wss://') === 0) return 'https://' + wsUrl.slice(6).replace(/\/ws$/, '');
+  if (wsUrl.indexOf('ws://') === 0) return 'http://' + wsUrl.slice(5).replace(/\/ws$/, '');
+  return '';
+}
+
+function setKDebugEnabled(enabled) {
+  kDebugEnabled = !!enabled;
+  if (kDebugToggleBtn) kDebugToggleBtn.textContent = 'Debug View: ' + (kDebugEnabled ? 'On' : 'Off');
+  if (kDebugWrap) kDebugWrap.classList.toggle('hidden', !kDebugEnabled);
+  if (!kDebugEnabled) {
+    if (kDebugTimer !== null) {
+      clearInterval(kDebugTimer);
+      kDebugTimer = null;
+    }
+    if (kinectDebugCtx) kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
+    return;
+  }
+  var root = bridgeToHttpRoot(BRIDGE_URL);
+  if (!root) return;
+  if (kDebugTimer !== null) clearInterval(kDebugTimer);
+  kDebugTimer = setInterval(function() {
+    if (!kinectDebugImg) return;
+    kinectDebugImg.src = root + '/debug/color.jpg?t=' + Date.now();
+  }, 120);
+}
 
 function setBridgeStatus(text, cls) {
   if (!bridgeStatusEl) return;
@@ -781,6 +838,7 @@ function connectBridge() {
     setBridgeStatus('Bridge disconnected — retry in 3s', 'warn');
     clearOverlay();
     hideCalibrationOverlay();
+    if (kDebugEnabled) setKDebugEnabled(false);
     calibrationMode = false;
     setTimeout(connectBridge, 3000);
   };
@@ -867,6 +925,7 @@ function endPinch() {
 
 function onHandFrame(m) {
   renderOverlay(m);
+  updateKinectDebug(m);
   if (calibrationMode) {
     updateCalibrationUI(m);
     if (pinchActive) endPinch();
@@ -924,6 +983,56 @@ function renderOverlay(m) {
     overlayCtx.fill();
   }
   overlayCtx.restore();
+}
+
+function updateKinectDebug(m) {
+  if (!kDebugEnabled) return;
+  if (!kinectDebugStats) return;
+  var distCm = (typeof m.pinch_dist_m === 'number' && m.pinch_dist_m >= 0)
+    ? (m.pinch_dist_m * 100).toFixed(1) + 'cm'
+    : '-';
+  kinectDebugStats.textContent =
+    'tracked: ' + (m.tracked ? 'yes' : 'no') +
+    ' | confident: ' + (m.confident ? 'yes' : 'no') +
+    ' | pinch(raw/stable): ' + (m.pinch_raw ? '1' : '0') + '/' + (m.pinch ? '1' : '0') +
+    ' | dist: ' + distCm;
+
+  if (!kinectDebugCtx) return;
+  kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
+  if (!m.debug_joints) return;
+  var hj = m.debug_joints.hand_color || [-1, -1];
+  var tj = m.debug_joints.thumb_color || [-1, -1];
+  var wj = m.debug_joints.wrist_color || [-1, -1];
+  var sx = kinectDebugCanvas.width / 1920;
+  var sy = kinectDebugCanvas.height / 1080;
+  function p(pt) { return [pt[0] * sx, pt[1] * sy]; }
+  function valid(pt) { return pt[0] >= 0 && pt[1] >= 0; }
+  var hp = p(hj), tp = p(tj), wp = p(wj);
+
+  kinectDebugCtx.lineWidth = 2;
+  if (valid(hj) && valid(wj)) {
+    kinectDebugCtx.strokeStyle = 'rgba(112, 210, 255, 0.95)';
+    kinectDebugCtx.beginPath();
+    kinectDebugCtx.moveTo(wp[0], wp[1]);
+    kinectDebugCtx.lineTo(hp[0], hp[1]);
+    kinectDebugCtx.stroke();
+  }
+  if (valid(hj) && valid(tj)) {
+    kinectDebugCtx.strokeStyle = 'rgba(255, 180, 70, 0.95)';
+    kinectDebugCtx.beginPath();
+    kinectDebugCtx.moveTo(hp[0], hp[1]);
+    kinectDebugCtx.lineTo(tp[0], tp[1]);
+    kinectDebugCtx.stroke();
+  }
+  function dot(pt, color, r) {
+    kinectDebugCtx.fillStyle = color;
+    kinectDebugCtx.beginPath();
+    kinectDebugCtx.arc(pt[0], pt[1], r, 0, Math.PI * 2);
+    kinectDebugCtx.fill();
+  }
+  if (valid(wj)) dot(wp, 'rgba(112, 210, 255, 0.95)', 3.2);
+  if (valid(hj)) dot(hp, m.pinch ? 'rgba(255, 60, 60, 0.95)' : 'rgba(255,255,255,0.95)', 4.0);
+  if (valid(tj)) dot(tp, 'rgba(255, 180, 70, 0.95)', 3.0);
 }
 
 // --- Calibration wizard UI ---
@@ -1011,6 +1120,7 @@ if (calCancelBtn) calCancelBtn.onclick = function() { sendBridge({ op: 'cancel_c
 if (calResetBtn) calResetBtn.onclick = function() {
   if (confirm('Clear stored Kinect calibration?')) sendBridge({ op: 'reset_calibration' });
 };
+if (kDebugToggleBtn) kDebugToggleBtn.onclick = function() { setKDebugEnabled(!kDebugEnabled); };
 
 // Initial overlay sizing + kick off bridge connection.
 resizeOverlayCanvas();

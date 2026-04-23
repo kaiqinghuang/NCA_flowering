@@ -33,8 +33,12 @@ class RawHandFrame:
     tracked: bool           # is there a tracked body with a right hand at all
     hand_pos: tuple         # (x, y, z) of JointType_HandTipRight in Kinect frame
     thumb_pos: tuple        # (x, y, z) of JointType_ThumbRight
+    wrist_pos: tuple        # (x, y, z) of JointType_WristRight
     hand_state: int         # HAND_STATE_* above (right hand)
     confident: bool         # both joints reported TrackingState_Tracked (strict)
+    hand_color: tuple       # (x, y) in Kinect color image space
+    thumb_color: tuple      # (x, y) in Kinect color image space
+    wrist_color: tuple      # (x, y) in Kinect color image space
 
 
 class KinectSource:
@@ -43,6 +47,8 @@ class KinectSource:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.started_ok = False  # set True once the Kinect runtime is up
+        self._debug_jpeg: Optional[bytes] = None
+        self._debug_lock = threading.Lock()
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True, name="kinect")
@@ -52,6 +58,10 @@ class KinectSource:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1.5)
+
+    def get_debug_jpeg(self) -> Optional[bytes]:
+        with self._debug_lock:
+            return self._debug_jpeg
 
     # -- internal --
 
@@ -67,7 +77,7 @@ class KinectSource:
             time.clock = time.perf_counter  # type: ignore[attr-defined]
         try:
             import numpy as np
-            if not hasattr(np, "object"):
+            if "object" not in np.__dict__:
                 np.object = object  # type: ignore[attr-defined]
         except Exception:
             # If numpy isn't importable here, PyKinect2 import will still
@@ -81,8 +91,11 @@ class KinectSource:
             from pykinect2.PyKinectV2 import (
                 JointType_HandTipRight,
                 JointType_ThumbRight,
+                JointType_HandRight,
+                JointType_WristRight,
                 TrackingState_Tracked,
                 FrameSourceTypes_Body,
+                FrameSourceTypes_Color,
             )
             from pykinect2 import PyKinectRuntime
         except Exception as e:  # noqa: BLE001
@@ -93,7 +106,9 @@ class KinectSource:
             return
 
         try:
-            runtime = PyKinectRuntime.PyKinectRuntime(FrameSourceTypes_Body)
+            runtime = PyKinectRuntime.PyKinectRuntime(
+                FrameSourceTypes_Body | FrameSourceTypes_Color
+            )
         except Exception as e:  # noqa: BLE001
             print(f"[kinect] Failed to open Kinect runtime: {e}")
             self._emit_untracked_forever()
@@ -101,8 +116,19 @@ class KinectSource:
 
         self.started_ok = True
         print("[kinect] Runtime started; waiting for body frames.")
+        color_shape = (1080, 1920, 4)  # BGRA
+        last_debug_push = 0.0
 
         while not self._stop.is_set():
+            if runtime.has_new_color_frame():
+                try:
+                    cf = runtime.get_last_color_frame()
+                    if cf is not None:
+                        self._update_debug_jpeg(cf, color_shape, now=time.time(), last_ref=last_debug_push)
+                        last_debug_push = time.time()
+                except Exception:
+                    pass
+
             if not runtime.has_new_body_frame():
                 time.sleep(0.003)
                 continue
@@ -123,19 +149,41 @@ class KinectSource:
                 self._emit(RawHandFrame(
                     t=now, tracked=False,
                     hand_pos=(0.0, 0.0, 0.0), thumb_pos=(0.0, 0.0, 0.0),
+                    wrist_pos=(0.0, 0.0, 0.0),
                     hand_state=HAND_STATE_NOT_TRACKED, confident=False,
+                    hand_color=(-1.0, -1.0), thumb_color=(-1.0, -1.0), wrist_color=(-1.0, -1.0),
                 ))
                 continue
 
             joints = chosen.joints
             hand = joints[JointType_HandTipRight]
             thumb = joints[JointType_ThumbRight]
+            wrist = joints[JointType_WristRight]
+            hand_joint = joints[JointType_HandRight]
             confident = (
                 hand.TrackingState == TrackingState_Tracked
                 and thumb.TrackingState == TrackingState_Tracked
             )
             hp = (hand.Position.x, hand.Position.y, hand.Position.z)
             tp = (thumb.Position.x, thumb.Position.y, thumb.Position.z)
+            wp = (wrist.Position.x, wrist.Position.y, wrist.Position.z)
+            hc = (-1.0, -1.0)
+            tc = (-1.0, -1.0)
+            wc = (-1.0, -1.0)
+            try:
+                cpoints = runtime.body_joints_to_color_space(joints)
+                hcp = cpoints[JointType_HandTipRight]
+                tcp = cpoints[JointType_ThumbRight]
+                wcp = cpoints[JointType_WristRight]
+                hhp = cpoints[JointType_HandRight]
+                hc = (float(hcp.x), float(hcp.y))
+                tc = (float(tcp.x), float(tcp.y))
+                wc = (float(wcp.x), float(wcp.y))
+                # If HandTip is low confidence but HandRight is available, use it.
+                if hc[0] < 0 and hhp is not None:
+                    hc = (float(hhp.x), float(hhp.y))
+            except Exception:
+                pass
             try:
                 state = int(chosen.hand_right_state)
             except Exception:  # noqa: BLE001
@@ -143,7 +191,9 @@ class KinectSource:
 
             self._emit(RawHandFrame(
                 t=now, tracked=True, hand_pos=hp, thumb_pos=tp,
+                wrist_pos=wp,
                 hand_state=state, confident=confident,
+                hand_color=hc, thumb_color=tc, wrist_color=wc,
             ))
 
         try:
@@ -164,6 +214,26 @@ class KinectSource:
             self._emit(RawHandFrame(
                 t=time.time(), tracked=False,
                 hand_pos=(0.0, 0.0, 0.0), thumb_pos=(0.0, 0.0, 0.0),
+                wrist_pos=(0.0, 0.0, 0.0),
                 hand_state=HAND_STATE_NOT_TRACKED, confident=False,
+                hand_color=(-1.0, -1.0), thumb_color=(-1.0, -1.0), wrist_color=(-1.0, -1.0),
             ))
             time.sleep(0.1)
+
+    def _update_debug_jpeg(self, flat_color_frame, color_shape, now: float, last_ref: float):
+        # Keep debug feed lightweight: ~10 FPS JPEG preview is enough.
+        if now - last_ref < 0.09:
+            return
+        try:
+            import numpy as np
+            import cv2
+            arr = np.asarray(flat_color_frame, dtype=np.uint8).reshape(color_shape)
+            bgr = arr[:, :, :3]  # BGRA -> BGR
+            small = cv2.resize(bgr, (640, 360), interpolation=cv2.INTER_AREA)
+            ok, enc = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+            if ok:
+                with self._debug_lock:
+                    self._debug_jpeg = enc.tobytes()
+        except Exception:
+            # Debug view should never break hand tracking loop.
+            return

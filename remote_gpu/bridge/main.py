@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .calibration import Calibration
@@ -132,12 +132,17 @@ async def processor_loop() -> None:
 
         tracked = bool(raw.tracked)
         pinch_raw = False
+        pinch_dist = -1.0
         cal_status: dict = {"state": "idle"}
         cx_canvas: Optional[float] = None
         cy_canvas: Optional[float] = None
 
         if tracked:
             xz = (raw.hand_pos[0], raw.hand_pos[2])
+            dx = raw.hand_pos[0] - raw.thumb_pos[0]
+            dy = raw.hand_pos[1] - raw.thumb_pos[1]
+            dz = raw.hand_pos[2] - raw.thumb_pos[2]
+            pinch_dist = (dx * dx + dy * dy + dz * dz) ** 0.5
             pinch_raw = gesture.raw_pinch(
                 raw.hand_pos, raw.thumb_pos, raw.hand_state, raw.confident,
             )
@@ -176,6 +181,13 @@ async def processor_loop() -> None:
             "cal_mode": calibration.mode,
             "cal_status": cal_status,
             "pinch": bool(stable_pinch),
+            "pinch_raw": bool(pinch_raw),
+            "pinch_dist_m": float(pinch_dist),
+            "debug_joints": {
+                "hand_color": [raw.hand_color[0], raw.hand_color[1]],
+                "thumb_color": [raw.thumb_color[0], raw.thumb_color[1]],
+                "wrist_color": [raw.wrist_color[0], raw.wrist_color[1]],
+            },
         }
         if ema_xy is not None:
             payload["cx"] = ema_xy[0]
@@ -253,3 +265,11 @@ async def root():
         "kinect_ok": kinect.started_ok,
         "clients": len(clients),
     }
+
+
+@app.get("/debug/color.jpg")
+async def debug_color_jpg():
+    jpeg = kinect.get_debug_jpeg()
+    if not jpeg:
+        return Response(status_code=404)
+    return Response(content=jpeg, media_type="image/jpeg")
