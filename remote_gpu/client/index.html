@@ -780,9 +780,22 @@ var kDebugTimer = null;
 
 function bridgeToHttpRoot(wsUrl) {
   if (!wsUrl || typeof wsUrl !== 'string') return '';
-  if (wsUrl.indexOf('wss://') === 0) return 'https://' + wsUrl.slice(6).replace(/\/ws$/, '');
-  if (wsUrl.indexOf('ws://') === 0) return 'http://' + wsUrl.slice(5).replace(/\/ws$/, '');
-  return '';
+  try {
+    var u = new URL(wsUrl);
+    var httpProto = (u.protocol === 'wss:') ? 'https:' : (u.protocol === 'ws:' ? 'http:' : '');
+    if (!httpProto) return '';
+    // Accept both ".../ws" and ".../ws/" while preserving proxy path prefixes.
+    var p = u.pathname || '/';
+    p = p.replace(/\/+$/, '');
+    if (p.endsWith('/ws')) p = p.slice(0, -3);
+    if (!p) p = '/';
+    return httpProto + '//' + u.host + p;
+  } catch (_) {
+    // Fallback for malformed inputs; keep previous behavior as best-effort.
+    if (wsUrl.indexOf('wss://') === 0) return 'https://' + wsUrl.slice(6).replace(/\/ws\/?$/, '');
+    if (wsUrl.indexOf('ws://') === 0) return 'http://' + wsUrl.slice(5).replace(/\/ws\/?$/, '');
+    return '';
+  }
 }
 
 function setKDebugEnabled(enabled) {
@@ -795,6 +808,7 @@ function setKDebugEnabled(enabled) {
       kDebugTimer = null;
     }
     if (kinectDebugCtx) kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
+    if (kinectDebugImg) kinectDebugImg.removeAttribute('src');
     return;
   }
   var root = bridgeToHttpRoot(BRIDGE_URL);
@@ -804,6 +818,15 @@ function setKDebugEnabled(enabled) {
     if (!kinectDebugImg) return;
     kinectDebugImg.src = root + '/debug/color.jpg?t=' + Date.now();
   }, 120);
+}
+
+if (kinectDebugImg) {
+  kinectDebugImg.onerror = function() {
+    if (kinectDebugStats) {
+      kinectDebugStats.textContent =
+        'debug image load failed; check bridge URL/path and /debug/color.jpg availability';
+    }
+  };
 }
 
 function setBridgeStatus(text, cls) {
