@@ -777,6 +777,9 @@ var kinectDebugCtx = kinectDebugCanvas ? kinectDebugCanvas.getContext('2d') : nu
 var kinectDebugStats = document.getElementById('kinectDebugStats');
 var kDebugEnabled = false;
 var kDebugTimer = null;
+var kDebugInflight = false;
+var kDebugBaseUrl = '';
+var kDebugPollMs = 140;
 
 function bridgeToHttpRoot(wsUrl) {
   if (!wsUrl || typeof wsUrl !== 'string') return '';
@@ -827,26 +830,52 @@ function setKDebugEnabled(enabled) {
       clearInterval(kDebugTimer);
       kDebugTimer = null;
     }
+    kDebugInflight = false;
+    kDebugBaseUrl = '';
     if (kinectDebugCtx) kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
     if (kinectDebugImg) kinectDebugImg.removeAttribute('src');
     return;
   }
   var debugBase = bridgeDebugImageBase(BRIDGE_URL);
-  if (!debugBase) return;
-  if (kDebugTimer !== null) clearInterval(kDebugTimer);
-  kDebugTimer = setInterval(function() {
-    if (!kinectDebugImg) return;
-    var sep = (debugBase.indexOf('?') >= 0) ? '&' : '?';
-    kinectDebugImg.src = debugBase + sep + 't=' + Date.now();
-  }, 120);
+  if (!debugBase || !kinectDebugImg) return;
+  kDebugBaseUrl = debugBase;
+  kDebugInflight = false;
+  if (kDebugTimer !== null) {
+    clearInterval(kDebugTimer);
+    kDebugTimer = null;
+  }
+  // Pull debug frames sequentially: wait previous load/error before next request.
+  requestKinectDebugFrame();
+}
+
+function requestKinectDebugFrame() {
+  if (!kDebugEnabled || !kinectDebugImg || !kDebugBaseUrl) return;
+  if (kDebugInflight) return;
+  kDebugInflight = true;
+  var sep = (kDebugBaseUrl.indexOf('?') >= 0) ? '&' : '?';
+  kinectDebugImg.src = kDebugBaseUrl + sep + 't=' + Date.now();
+}
+
+function scheduleNextKinectDebugFrame() {
+  if (!kDebugEnabled) return;
+  if (kDebugTimer !== null) clearTimeout(kDebugTimer);
+  kDebugTimer = setTimeout(function() {
+    requestKinectDebugFrame();
+  }, kDebugPollMs);
 }
 
 if (kinectDebugImg) {
+  kinectDebugImg.onload = function() {
+    kDebugInflight = false;
+    scheduleNextKinectDebugFrame();
+  };
   kinectDebugImg.onerror = function() {
+    kDebugInflight = false;
     if (kinectDebugStats) {
       kinectDebugStats.textContent =
         'debug image load failed; check bridge URL/path and /debug/color.jpg availability';
     }
+    scheduleNextKinectDebugFrame();
   };
 }
 
