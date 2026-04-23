@@ -160,9 +160,15 @@
       <div class="row" style="gap:6px;">
         <button class="btn" id="calResetBtn" style="flex:1;">Reset calibration</button>
       </div>
+      <div class="row" style="gap:6px; margin-top:6px;">
+        <button class="btn" id="planeFitBtn" style="flex:1;" title="Depth mode only: clear hands from view, then capture TV surface">
+          Fit TV plane (depth)
+        </button>
+      </div>
       <div class="help" style="margin-top:6px;">
         Pinch (thumb + index) to paint with the selected brush.
         Calibration: pinch &amp; hold over each highlighted corner for ~½ second.
+        <span id="kinectModeHelp" style="display:block;margin-top:4px;color:#777;"></span>
       </div>
       <div class="row" style="gap:6px; margin-top:8px;">
         <button class="btn" id="kDebugToggleBtn" style="flex:1;">Debug View: Off</button>
@@ -764,6 +770,8 @@ var BRIDGE_URL = (function() {
 var bridgeWs = null;
 var bridgeReady = false;
 var calibrationMode = false;
+var bridgeKinectMode = 'body';
+var bridgePlaneReady = false;
 var bridgeStatusEl = document.getElementById('kinectStatus');
 var calBtn = document.getElementById('calBtn');
 var calCancelBtn = document.getElementById('calCancelBtn');
@@ -925,9 +933,18 @@ function connectBridge() {
 function handleBridgeMsg(m) {
   var op = m.op;
   if (op === 'hello') {
+    bridgeKinectMode = m.kinect_mode || 'body';
+    bridgePlaneReady = !!m.plane_ready;
+    var modeHelp = document.getElementById('kinectModeHelp');
+    if (modeHelp) {
+      modeHelp.textContent = bridgeKinectMode === 'depth'
+        ? ('Tracking: depth blobs | TV plane: ' + (bridgePlaneReady ? 'ready' : 'NOT fitted — use “Fit TV plane”'))
+        : ('Tracking: SDK body joints | TV plane: n/a');
+    }
     var kinectOk = !!m.kinect_ok;
     setBridgeStatus(kinectOk
-      ? ('Bridge connected — Kinect OK' + (m.cal_ready ? ', calibrated' : ', NOT calibrated'))
+      ? ('Bridge connected — Kinect OK' + (m.cal_ready ? ', calibrated' : ', NOT calibrated')
+        + ' | mode: ' + bridgeKinectMode + (bridgeKinectMode === 'depth' ? (' | plane: ' + (bridgePlaneReady ? 'ok' : 'no')) : ''))
       : 'Bridge connected — Kinect not found',
       kinectOk ? 'ok' : 'warn');
   } else if (op === 'hand') {
@@ -942,6 +959,17 @@ function handleBridgeMsg(m) {
     hideCalibrationOverlay();
     calCancelBtn.disabled = true;
     calBtn.disabled = false;
+  } else if (op === 'plane_capture_started') {
+    setBridgeStatus('Capturing TV plane… keep hands out of the depth view', 'warn');
+  } else if (op === 'plane_ready') {
+    bridgePlaneReady = true;
+    var mh = document.getElementById('kinectModeHelp');
+    if (mh && bridgeKinectMode === 'depth') {
+      mh.textContent = 'Tracking: depth blobs | TV plane: ready';
+    }
+    setBridgeStatus('TV plane fitted — depth segmentation enabled', 'ok');
+  } else if (op === 'plane_capture_failed') {
+    setBridgeStatus('TV plane capture failed: ' + (m.reason || 'unknown'), 'err');
   }
 }
 
@@ -1194,6 +1222,10 @@ if (calResetBtn) calResetBtn.onclick = function() {
   if (confirm('Clear stored Kinect calibration?')) sendBridge({ op: 'reset_calibration' });
 };
 if (kDebugToggleBtn) kDebugToggleBtn.onclick = function() { setKDebugEnabled(!kDebugEnabled); };
+var planeFitBtn = document.getElementById('planeFitBtn');
+if (planeFitBtn) planeFitBtn.onclick = function() {
+  sendBridge({ op: 'capture_tv_plane' });
+};
 
 // Initial overlay sizing + kick off bridge connection.
 resizeOverlayCanvas();

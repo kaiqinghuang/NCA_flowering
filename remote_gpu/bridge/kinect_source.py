@@ -39,6 +39,9 @@ class RawHandFrame:
     hand_color: tuple       # (x, y) in Kinect color image space
     thumb_color: tuple      # (x, y) in Kinect color image space
     wrist_color: tuple      # (x, y) in Kinect color image space
+    # When set, `main.processor_loop` uses these instead of skeleton pinch logic.
+    pinch_raw_direct: Optional[bool] = None
+    pinch_dist_direct_m: Optional[float] = None
 
 
 class KinectSource:

@@ -11,9 +11,11 @@ Browser → Bridge (JSON text):
     {"op": "start_calibration"}
     {"op": "cancel_calibration"}
     {"op": "reset_calibration"}
+    {"op": "capture_tv_plane"}   # depth mode: fit TV surface plane (hands out of view)
 
 Bridge → Browser (JSON text, broadcast to all connected clients):
-    {"op": "hello", "canvas": [W, H], "cal_ready": bool}
+    {"op": "hello", "canvas": [W, H], "cal_ready": bool, "kinect_mode": "body|depth",
+     "plane_ready": bool}
     {"op": "hand", "t": ..., "tracked": bool, "confident": bool,
      "cal_ready": bool, "cal_mode": "idle|capturing",
      "cal_status": {...},
@@ -37,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .calibration import Calibration
 from .gesture import GestureProcessor
 from .kinect_source import KinectSource, RawHandFrame
+from .plane_calibration import PlaneCalibration
 
 
 # ------------------ Config ------------------
@@ -48,9 +51,14 @@ EMA_ALPHA = float(os.environ.get("BRIDGE_EMA_ALPHA", "0.35"))
 BROADCAST_HZ = float(os.environ.get("BRIDGE_BROADCAST_HZ", "30"))
 PINCH_DIST_M = float(os.environ.get("BRIDGE_PINCH_DIST_M", "0.03"))
 DEBOUNCE_FRAMES = int(os.environ.get("BRIDGE_DEBOUNCE", "1"))
+KINECT_MODE = os.environ.get("BRIDGE_KINECT_MODE", "body").strip().lower()
+DEPTH_BAND_MIN_M = float(os.environ.get("BRIDGE_DEPTH_BAND_MIN_M", "0.02"))
+DEPTH_BAND_MAX_M = float(os.environ.get("BRIDGE_DEPTH_BAND_MAX_M", "0.40"))
+DEPTH_PINCH_EIGEN = float(os.environ.get("BRIDGE_DEPTH_PINCH_EIGEN", "2.8"))
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 CAL_PATH = str(SCRIPT_DIR / "calibration.json")
+PLANE_PATH = str(SCRIPT_DIR / "plane.json")
 
 
 # ------------------ Globals ------------------
@@ -72,6 +80,7 @@ _main_loop: Optional[asyncio.AbstractEventLoop] = None
 _new_raw_event: Optional[asyncio.Event] = None
 
 calibration = Calibration(CAL_PATH, (CANVAS_W, CANVAS_H))
+plane_calibration = PlaneCalibration(PLANE_PATH)
 gesture = GestureProcessor(
     ema_alpha=EMA_ALPHA,
     pinch_dist_m=PINCH_DIST_M,
@@ -89,7 +98,20 @@ def _on_kinect_frame(frame: RawHandFrame) -> None:
         _main_loop.call_soon_threadsafe(_new_raw_event.set)
 
 
-kinect = KinectSource(_on_kinect_frame)
+if KINECT_MODE == "depth":
+    from .kinect_depth_source import KinectDepthSource
+
+    kinect = KinectDepthSource(
+        _on_kinect_frame,
+        plane_calibration,
+        band_min_m=DEPTH_BAND_MIN_M,
+        band_max_m=DEPTH_BAND_MAX_M,
+        pinch_eigen_ratio=DEPTH_PINCH_EIGEN,
+    )
+    print("[bridge] Kinect mode: depth (body tracking disabled)")
+else:
+    kinect = KinectSource(_on_kinect_frame)
+    print("[bridge] Kinect mode: body (SDK joints)")
 
 
 # ------------------ Broadcast helper ------------------
@@ -139,13 +161,20 @@ async def processor_loop() -> None:
 
         if tracked:
             xz = (raw.hand_pos[0], raw.hand_pos[2])
-            dx = raw.hand_pos[0] - raw.thumb_pos[0]
-            dy = raw.hand_pos[1] - raw.thumb_pos[1]
-            dz = raw.hand_pos[2] - raw.thumb_pos[2]
-            pinch_dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-            pinch_raw = gesture.raw_pinch(
-                raw.hand_pos, raw.thumb_pos, raw.hand_state, raw.confident,
-            )
+            if raw.pinch_raw_direct is not None:
+                pinch_raw = bool(raw.pinch_raw_direct)
+                if raw.pinch_dist_direct_m is not None and raw.pinch_dist_direct_m >= 0:
+                    pinch_dist = float(raw.pinch_dist_direct_m)
+                else:
+                    pinch_dist = -1.0
+            else:
+                dx = raw.hand_pos[0] - raw.thumb_pos[0]
+                dy = raw.hand_pos[1] - raw.thumb_pos[1]
+                dz = raw.hand_pos[2] - raw.thumb_pos[2]
+                pinch_dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+                pinch_raw = gesture.raw_pinch(
+                    raw.hand_pos, raw.thumb_pos, raw.hand_state, raw.confident,
+                )
 
             if calibration.mode == "capturing":
                 # Route pinch-held samples to the calibration state machine.
@@ -195,6 +224,11 @@ async def processor_loop() -> None:
 
         await _broadcast(payload)
 
+        drain = getattr(kinect, "drain_pending_msgs", None)
+        if callable(drain):
+            for extra in drain():
+                await _broadcast(extra)
+
 
 # ------------------ Lifecycle ------------------
 @app.on_event("startup")
@@ -205,7 +239,9 @@ async def on_startup() -> None:
     kinect.start()
     asyncio.create_task(processor_loop())
     print(f"[bridge] canvas={CANVAS_W}x{CANVAS_H} ema={EMA_ALPHA} "
-          f"pinch<={PINCH_DIST_M*100:.1f}cm  listening on ws://{HOST}:{PORT}/ws")
+          f"pinch<={PINCH_DIST_M*100:.1f}cm  mode={KINECT_MODE}  "
+          f"plane={'yes' if plane_calibration.ready else 'no'}  "
+          f"listening on ws://{HOST}:{PORT}/ws")
 
 
 @app.on_event("shutdown")
@@ -226,6 +262,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
             "cal_ready": calibration.ready,
             "cal_mode": calibration.mode,
             "kinect_ok": kinect.started_ok,
+            "kinect_mode": KINECT_MODE,
+            "plane_ready": plane_calibration.ready,
         }))
         while True:
             text = await ws.receive_text()
@@ -244,6 +282,16 @@ async def ws_endpoint(ws: WebSocket) -> None:
             elif op == "reset_calibration":
                 calibration.reset()
                 await _broadcast({"op": "cal_reset"})
+            elif op == "capture_tv_plane":
+                req = getattr(kinect, "request_plane_capture", None)
+                if callable(req):
+                    req()
+                    await _broadcast({"op": "plane_capture_started"})
+                else:
+                    await ws.send_text(json.dumps({
+                        "op": "plane_capture_failed",
+                        "reason": "depth mode not active",
+                    }))
             elif op == "ping":
                 await ws.send_text(json.dumps({"op": "pong", "t": time.time()}))
     except WebSocketDisconnect:
@@ -263,6 +311,8 @@ async def root():
         "canvas": [CANVAS_W, CANVAS_H],
         "cal_ready": calibration.ready,
         "kinect_ok": kinect.started_ok,
+        "kinect_mode": KINECT_MODE,
+        "plane_ready": plane_calibration.ready,
         "clients": len(clients),
     }
 

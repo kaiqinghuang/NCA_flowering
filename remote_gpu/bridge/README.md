@@ -44,12 +44,26 @@ pip install -r bridge/requirements.txt
 python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
 ```
 
+### Depth-only mode (no body / hand skeleton)
+
+Uses the 512×424 depth map: band in front of the TV plane → largest blob → fingertip (furthest from centroid) + geometric pinch (local point-cloud elongation). Set:
+
+```powershell
+set BRIDGE_KINECT_MODE=depth
+python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
+```
+
+1. In the browser Kinect panel, click **Fit TV plane (depth)** with **hands out of view** (~1.2s capture).
+2. Then run the usual **Calibrate** four corners (pinch-hold) so `(x,z)` maps to the canvas.
+
 Expected boot log:
 
 ```
 [kinect] Runtime started; waiting for body frames.
 [bridge] canvas=960x540 ema=0.35 pinch<=3.0cm  listening on ws://0.0.0.0:7000/ws
 ```
+
+With `BRIDGE_KINECT_MODE=depth` you should see `[kinect-depth] Runtime started` instead of body-frame lines.
 
 If you see `PyKinect2 import failed` the bridge keeps running but emits no
 hand frames — install PyKinect2 and the Kinect SDK.
