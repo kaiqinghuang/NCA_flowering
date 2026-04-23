@@ -798,6 +798,26 @@ function bridgeToHttpRoot(wsUrl) {
   }
 }
 
+function bridgeDebugImageBase(wsUrl) {
+  if (!wsUrl || typeof wsUrl !== 'string') return '';
+  try {
+    var u = new URL(wsUrl);
+    var httpProto = (u.protocol === 'wss:') ? 'https:' : (u.protocol === 'ws:' ? 'http:' : '');
+    if (!httpProto) return '';
+    var p = u.pathname || '/';
+    p = p.replace(/\/+$/, '');
+    if (p.endsWith('/ws')) p = p.slice(0, -3);
+    if (!p) p = '/';
+    if (p[p.length - 1] !== '/') p += '/';
+    var base = httpProto + '//' + u.host + p + 'debug/color.jpg';
+    // Preserve query parameters (e.g. RunPod token) required by the bridge ingress.
+    if (u.search && u.search.length > 1) base += u.search;
+    return base;
+  } catch (_) {
+    return '';
+  }
+}
+
 function setKDebugEnabled(enabled) {
   kDebugEnabled = !!enabled;
   if (kDebugToggleBtn) kDebugToggleBtn.textContent = 'Debug View: ' + (kDebugEnabled ? 'On' : 'Off');
@@ -811,12 +831,13 @@ function setKDebugEnabled(enabled) {
     if (kinectDebugImg) kinectDebugImg.removeAttribute('src');
     return;
   }
-  var root = bridgeToHttpRoot(BRIDGE_URL);
-  if (!root) return;
+  var debugBase = bridgeDebugImageBase(BRIDGE_URL);
+  if (!debugBase) return;
   if (kDebugTimer !== null) clearInterval(kDebugTimer);
   kDebugTimer = setInterval(function() {
     if (!kinectDebugImg) return;
-    kinectDebugImg.src = root + '/debug/color.jpg?t=' + Date.now();
+    var sep = (debugBase.indexOf('?') >= 0) ? '&' : '?';
+    kinectDebugImg.src = debugBase + sep + 't=' + Date.now();
   }, 120);
 }
 
