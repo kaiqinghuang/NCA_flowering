@@ -770,7 +770,7 @@ var BRIDGE_URL = (function() {
 var bridgeWs = null;
 var bridgeReady = false;
 var calibrationMode = false;
-var bridgeKinectMode = 'body';
+var bridgeKinectMode = 'depth';
 var bridgePlaneReady = false;
 var bridgeStatusEl = document.getElementById('kinectStatus');
 var calBtn = document.getElementById('calBtn');
@@ -933,7 +933,7 @@ function connectBridge() {
 function handleBridgeMsg(m) {
   var op = m.op;
   if (op === 'hello') {
-    bridgeKinectMode = m.kinect_mode || 'body';
+    bridgeKinectMode = m.kinect_mode || 'depth';
     bridgePlaneReady = !!m.plane_ready;
     var modeHelp = document.getElementById('kinectModeHelp');
     if (modeHelp) {
