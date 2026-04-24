@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .plane_calibration import PlaneModel
+from .plane_calibration import PlaneModel, ransac_plane
 
 
 # Kinect v2 depth intrinsics @ 512×424 (from Microsoft calibration bundle, meters).
