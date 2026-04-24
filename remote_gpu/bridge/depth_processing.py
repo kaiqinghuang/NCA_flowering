@@ -218,6 +218,81 @@ def _process_without_scipy(
     )
 
 
+def render_depth_debug_bgr(
+    depth_mm_flat: np.ndarray,
+    plane: Optional[PlaneModel],
+    band_min_m: float,
+    band_max_m: float,
+    result: Optional[DepthHandResult] = None,
+) -> np.ndarray:
+    """BGR image (H,W,3) for live debugging: depth colormap + plane band + fingertip."""
+    try:
+        import cv2
+    except ImportError:
+        return np.zeros((DEPTH_H, DEPTH_W, 3), dtype=np.uint8)
+
+    dmm = np.asarray(depth_mm_flat, dtype=np.uint16).reshape(DEPTH_H, DEPTH_W)
+    valid = (dmm > 0) & (dmm < 8192)
+    z_m = dmm.astype(np.float64) * 0.001
+
+    v_idx, u_idx = np.indices((DEPTH_H, DEPTH_W))
+    u_f = u_idx.astype(np.float64)
+    v_f = v_idx.astype(np.float64)
+    x = (u_f - DEPTH_CX) * z_m / DEPTH_FX
+    y = (v_f - DEPTH_CY) * z_m / DEPTH_FY
+
+    # Turbo colormap on clipped depth (mm)
+    d_clip = np.clip(dmm.astype(np.float32), 500.0, 4500.0)
+    norm = ((d_clip - 500.0) / (4500.0 - 500.0) * 255.0).astype(np.uint8)
+    norm[~valid] = 0
+    bgr = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
+    bgr[~valid] = (40, 40, 40)
+
+    if plane is not None:
+        s = x * plane.a + y * plane.b + z_m * plane.c + plane.d
+        s[~valid] = np.nan
+        band = (
+            valid
+            & np.isfinite(s)
+            & (s >= band_min_m)
+            & (s <= band_max_m)
+        )
+        green = np.zeros_like(bgr)
+        green[band] = (0, 220, 0)
+        bgr = np.where(band[:, :, None], ((bgr.astype(np.float32) * 0.55 + green.astype(np.float32) * 0.45)).astype(np.uint8), bgr)
+
+    tip_u, tip_v = -1.0, -1.0
+    pinch = False
+    tracked = False
+    conf = False
+    if result is not None:
+        tracked = result.tracked
+        conf = result.confident
+        pinch = result.pinch_raw
+        tip_u, tip_v = result.debug_uv_tip
+
+    if tip_u >= 0 and tip_v >= 0:
+        tu = int(np.clip(round(tip_u), 0, DEPTH_W - 1))
+        tv = int(np.clip(round(tip_v), 0, DEPTH_H - 1))
+        col = (60, 60, 255) if pinch else (255, 255, 255)
+        cv2.drawMarker(bgr, (tu, tv), col, markerType=cv2.MARKER_CROSS, markerSize=14, thickness=2)
+        cv2.circle(bgr, (tu, tv), 10, col, 1, cv2.LINE_AA)
+
+    status = (
+        f"plane={'ok' if plane else 'no'}  "
+        f"trk={'Y' if tracked else 'n'}  "
+        f"conf={'Y' if conf else 'n'}  "
+        f"pinch={'Y' if pinch else 'n'}"
+    )
+    cv2.rectangle(bgr, (4, 4), (min(480, DEPTH_W - 4), 28), (0, 0, 0), -1)
+    cv2.putText(
+        bgr, status, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 240, 220), 1, cv2.LINE_AA,
+    )
+
+    # Readable size in browser (~2x native)
+    return cv2.resize(bgr, (DEPTH_W * 2, DEPTH_H * 2), interpolation=cv2.INTER_NEAREST)
+
+
 def fit_plane_from_depth_stack(
     depth_frames: list[np.ndarray],
     max_points: int = 12000,

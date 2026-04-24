@@ -67,6 +67,10 @@ class KinectSource:
         with self._debug_lock:
             return self._debug_jpeg
 
+    def get_debug_depth_jpeg(self) -> Optional[bytes]:
+        """Body mode has no depth debug stream."""
+        return None
+
     # -- internal --
 
     def _apply_pykinect_compat_shims(self):

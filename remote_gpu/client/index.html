@@ -85,12 +85,16 @@
   .k-debug-wrap { margin-top: 8px; border: 1px solid #3a3a3a; border-radius: 6px;
                   padding: 6px; background: #141414; }
   .k-debug-wrap.hidden { display: none; }
-  .k-debug-stage { position: relative; width: 100%; aspect-ratio: 16 / 9;
+  .k-debug-stage { position: relative; width: 100%;
                    background: #000; border-radius: 4px; overflow: hidden; }
-  #kinectDebugImg, #kinectDebugCanvas {
+  .k-debug-stage-color { aspect-ratio: 16 / 9; }
+  .k-debug-stage-depth { aspect-ratio: 512 / 424; margin-top: 4px; }
+  .k-debug-feed-label { font-size: 10px; color: #888; margin-top: 6px; margin-bottom: 2px; }
+  #kinectDebugImg, #kinectDebugCanvas, #kinectDebugDepthImg {
     position: absolute; left: 0; top: 0; width: 100%; height: 100%;
   }
   #kinectDebugImg { object-fit: cover; image-rendering: auto; }
+  #kinectDebugDepthImg { object-fit: contain; image-rendering: pixelated; background: #080808; }
   #kinectDebugCanvas { pointer-events: none; }
   #kinectDebugStats { margin-top: 6px; font-size: 11px; color: #aaa; line-height: 1.35; }
 </style>
@@ -174,9 +178,14 @@
         <button class="btn" id="kDebugToggleBtn" style="flex:1;">Debug View: Off</button>
       </div>
       <div id="kDebugWrap" class="k-debug-wrap hidden">
-        <div class="k-debug-stage">
-          <img id="kinectDebugImg" alt="kinect debug stream">
+        <div class="k-debug-feed-label">RGB (color camera)</div>
+        <div class="k-debug-stage k-debug-stage-color">
+          <img id="kinectDebugImg" alt="kinect color stream">
           <canvas id="kinectDebugCanvas" width="320" height="180"></canvas>
+        </div>
+        <div class="k-debug-feed-label">Depth — TURBO colormap · green = in front of TV plane band · cross = fingertip (red = pinch)</div>
+        <div class="k-debug-stage k-debug-stage-depth">
+          <img id="kinectDebugDepthImg" alt="depth debug stream">
         </div>
         <div id="kinectDebugStats">tracked: - | confident: - | pinch: - | dist: -</div>
       </div>
@@ -780,6 +789,7 @@ var calOverlayEl = document.getElementById('calOverlay');
 var kDebugToggleBtn = document.getElementById('kDebugToggleBtn');
 var kDebugWrap = document.getElementById('kDebugWrap');
 var kinectDebugImg = document.getElementById('kinectDebugImg');
+var kinectDebugDepthImg = document.getElementById('kinectDebugDepthImg');
 var kinectDebugCanvas = document.getElementById('kinectDebugCanvas');
 var kinectDebugCtx = kinectDebugCanvas ? kinectDebugCanvas.getContext('2d') : null;
 var kinectDebugStats = document.getElementById('kinectDebugStats');
@@ -787,6 +797,9 @@ var kDebugEnabled = false;
 var kDebugTimer = null;
 var kDebugInflight = false;
 var kDebugBaseUrl = '';
+var kDebugDepthInflight = false;
+var kDebugDepthBaseUrl = '';
+var kDebugDepthTimer = null;
 var kDebugPollMs = 140;
 
 function bridgeToHttpRoot(wsUrl) {
@@ -807,6 +820,12 @@ function bridgeToHttpRoot(wsUrl) {
     if (wsUrl.indexOf('ws://') === 0) return 'http://' + wsUrl.slice(5).replace(/\/ws\/?$/, '');
     return '';
   }
+}
+
+function bridgeDebugDepthImageBase(wsUrl) {
+  var c = bridgeDebugImageBase(wsUrl);
+  if (!c) return '';
+  return c.replace('/debug/color.jpg', '/debug/depth.jpg');
 }
 
 function bridgeDebugImageBase(wsUrl) {
@@ -838,10 +857,17 @@ function setKDebugEnabled(enabled) {
       clearInterval(kDebugTimer);
       kDebugTimer = null;
     }
+    if (kDebugDepthTimer !== null) {
+      clearTimeout(kDebugDepthTimer);
+      kDebugDepthTimer = null;
+    }
     kDebugInflight = false;
     kDebugBaseUrl = '';
+    kDebugDepthInflight = false;
+    kDebugDepthBaseUrl = '';
     if (kinectDebugCtx) kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
     if (kinectDebugImg) kinectDebugImg.removeAttribute('src');
+    if (kinectDebugDepthImg) kinectDebugDepthImg.removeAttribute('src');
     return;
   }
   var debugBase = bridgeDebugImageBase(BRIDGE_URL);
@@ -854,6 +880,16 @@ function setKDebugEnabled(enabled) {
   }
   // Pull debug frames sequentially: wait previous load/error before next request.
   requestKinectDebugFrame();
+
+  kDebugDepthBaseUrl = bridgeDebugDepthImageBase(BRIDGE_URL) || '';
+  kDebugDepthInflight = false;
+  if (kDebugDepthTimer !== null) {
+    clearTimeout(kDebugDepthTimer);
+    kDebugDepthTimer = null;
+  }
+  if (kinectDebugDepthImg && kDebugDepthBaseUrl) {
+    requestKinectDebugFrameDepth();
+  }
 }
 
 function requestKinectDebugFrame() {
@@ -881,9 +917,36 @@ if (kinectDebugImg) {
     kDebugInflight = false;
     if (kinectDebugStats) {
       kinectDebugStats.textContent =
-        'debug image load failed; check bridge URL/path and /debug/color.jpg availability';
+        'color debug failed — check /debug/color.jpg | depth uses /debug/depth.jpg';
     }
     scheduleNextKinectDebugFrame();
+  };
+}
+
+function requestKinectDebugFrameDepth() {
+  if (!kDebugEnabled || !kinectDebugDepthImg || !kDebugDepthBaseUrl) return;
+  if (kDebugDepthInflight) return;
+  kDebugDepthInflight = true;
+  var sep = (kDebugDepthBaseUrl.indexOf('?') >= 0) ? '&' : '?';
+  kinectDebugDepthImg.src = kDebugDepthBaseUrl + sep + 't=' + Date.now();
+}
+
+function scheduleNextKinectDebugFrameDepth() {
+  if (!kDebugEnabled) return;
+  if (kDebugDepthTimer !== null) clearTimeout(kDebugDepthTimer);
+  kDebugDepthTimer = setTimeout(function() {
+    requestKinectDebugFrameDepth();
+  }, kDebugPollMs);
+}
+
+if (kinectDebugDepthImg) {
+  kinectDebugDepthImg.onload = function() {
+    kDebugDepthInflight = false;
+    scheduleNextKinectDebugFrameDepth();
+  };
+  kinectDebugDepthImg.onerror = function() {
+    kDebugDepthInflight = false;
+    scheduleNextKinectDebugFrameDepth();
   };
 }
 

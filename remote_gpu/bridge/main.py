@@ -338,3 +338,28 @@ async def debug_color_jpg():
             "Expires": "0",
         },
     )
+
+
+@app.get("/debug/depth.jpg")
+async def debug_depth_jpg():
+    """Depth-mode only: colormap + plane band + fingertip crosshair (~14 Hz)."""
+    getter = getattr(kinect, "get_debug_depth_jpeg", None)
+    jpeg = getter() if callable(getter) else None
+    if not jpeg:
+        return Response(
+            status_code=404,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )

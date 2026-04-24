@@ -13,7 +13,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .depth_processing import process_depth_frame
+from .depth_processing import process_depth_frame, render_depth_debug_bgr
 from .kinect_source import HAND_STATE_NOT_TRACKED, HAND_STATE_OPEN, RawHandFrame
 from .plane_calibration import PlaneCalibration, PlaneModel
 
@@ -36,6 +36,7 @@ class KinectDepthSource:
         self._stop = threading.Event()
         self.started_ok = False
         self._debug_jpeg: Optional[bytes] = None
+        self._debug_depth_jpeg: Optional[bytes] = None
         self._debug_lock = threading.Lock()
         self._debug_frame_idx = 0
         self._plane_capture = threading.Event()
@@ -55,6 +56,10 @@ class KinectDepthSource:
     def get_debug_jpeg(self) -> Optional[bytes]:
         with self._debug_lock:
             return self._debug_jpeg
+
+    def get_debug_depth_jpeg(self) -> Optional[bytes]:
+        with self._debug_lock:
+            return self._debug_depth_jpeg
 
     def request_plane_capture(self) -> None:
         """Signal the depth thread to grab ~1s of frames and fit / save the plane."""
@@ -103,6 +108,7 @@ class KinectDepthSource:
         print("[kinect-depth] Runtime started (depth + color).")
         color_shape = (1080, 1920, 4)
         last_debug_push = 0.0
+        last_depth_debug_push = 0.0
 
         while not self._stop.is_set():
             if self._plane_capture.is_set():
@@ -126,9 +132,10 @@ class KinectDepthSource:
             if depth is None:
                 continue
 
+            depth_flat = np.asarray(depth, dtype=np.uint16).ravel()
             plane: Optional[PlaneModel] = self.plane_cal.plane
             res = process_depth_frame(
-                np.asarray(depth, dtype=np.uint16).ravel(),
+                depth_flat,
                 plane,
                 band_min_m=self.band_min_m,
                 band_max_m=self.band_max_m,
@@ -136,6 +143,10 @@ class KinectDepthSource:
             )
 
             now = time.time()
+            if now - last_depth_debug_push > 0.07:
+                last_depth_debug_push = now
+                self._update_depth_debug_jpeg(depth_flat, plane, res)
+
             if not res.tracked:
                 self._emit(RawHandFrame(
                     t=now, tracked=False,
@@ -230,5 +241,24 @@ class KinectDepthSource:
             if ok:
                 with self._debug_lock:
                     self._debug_jpeg = enc.tobytes()
+        except Exception:
+            return
+
+    def _update_depth_debug_jpeg(
+        self,
+        depth_flat: np.ndarray,
+        plane: Optional[PlaneModel],
+        res,
+    ) -> None:
+        try:
+            import cv2
+
+            bgr = render_depth_debug_bgr(
+                depth_flat, plane, self.band_min_m, self.band_max_m, res,
+            )
+            ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+            if ok:
+                with self._debug_lock:
+                    self._debug_depth_jpeg = enc.tobytes()
         except Exception:
             return
