@@ -224,8 +224,16 @@ def render_depth_debug_bgr(
     band_min_m: float,
     band_max_m: float,
     result: Optional[DepthHandResult] = None,
+    surface_eps_m: float = 0.03,
 ) -> np.ndarray:
-    """BGR image (H,W,3) for live debugging: depth colormap + plane band + fingertip."""
+    """BGR image for live debugging: depth colormap + TV-plane slab + interaction band + tip.
+
+    **How to verify the plane matches the real TV:** look for the **magenta** overlay.
+    Those pixels are within ``surface_eps_m`` of the fitted plane in 3D — they should
+    line up with the physical TV rectangle (modulo depth noise). **Green** is the
+    interaction shell (``band_min_m``…``band_max_m`` in front of the plane) where
+    hand blobs are segmented.
+    """
     try:
         import cv2
     except ImportError:
@@ -248,18 +256,31 @@ def render_depth_debug_bgr(
     bgr = cv2.applyColorMap(norm, cv2.COLORMAP_TURBO)
     bgr[~valid] = (40, 40, 40)
 
+    n_on_plane = 0
     if plane is not None:
         s = x * plane.a + y * plane.b + z_m * plane.c + plane.d
         s[~valid] = np.nan
+        # Slab around the infinite plane: should coincide with the TV surface in image space.
+        on_plane = valid & np.isfinite(s) & (np.abs(s) <= surface_eps_m)
+        n_on_plane = int(np.count_nonzero(on_plane))
+        mag = np.array([255.0, 0.0, 255.0], dtype=np.float32)  # BGR magenta
+        bf = bgr.astype(np.float32)
+        om = on_plane[:, :, None]
+        bf = np.where(om, bf * 0.48 + mag * 0.52, bf)
+        bgr = bf.astype(np.uint8)
+
         band = (
             valid
             & np.isfinite(s)
             & (s >= band_min_m)
             & (s <= band_max_m)
         )
-        green = np.zeros_like(bgr)
-        green[band] = (0, 220, 0)
-        bgr = np.where(band[:, :, None], ((bgr.astype(np.float32) * 0.55 + green.astype(np.float32) * 0.45)).astype(np.uint8), bgr)
+        green = np.zeros_like(bgr, dtype=np.float32)
+        green[band] = (0.0, 220.0, 0.0)
+        bf = bgr.astype(np.float32)
+        bm = band[:, :, None]
+        blended = bf * 0.55 + green * 0.45
+        bgr = np.where(bm, blended, bf).astype(np.uint8)
 
     tip_u, tip_v = -1.0, -1.0
     pinch = False
@@ -280,13 +301,24 @@ def render_depth_debug_bgr(
 
     status = (
         f"plane={'ok' if plane else 'no'}  "
+        f"tvPx={n_on_plane // 1000}k  "
         f"trk={'Y' if tracked else 'n'}  "
         f"conf={'Y' if conf else 'n'}  "
         f"pinch={'Y' if pinch else 'n'}"
     )
-    cv2.rectangle(bgr, (4, 4), (min(480, DEPTH_W - 4), 28), (0, 0, 0), -1)
+    cv2.rectangle(bgr, (4, 4), (min(DEPTH_W - 4, 500), 46), (0, 0, 0), -1)
     cv2.putText(
-        bgr, status, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 240, 220), 1, cv2.LINE_AA,
+        bgr, status, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 240, 220), 1, cv2.LINE_AA,
+    )
+    if plane is not None:
+        hint = (
+            f"magenta = within {int(surface_eps_m * 1000)}mm of fitted plane (compare to TV)  "
+            f"green = {int(band_min_m * 1000)}-{int(band_max_m * 1000)}mm shell"
+        )
+    else:
+        hint = "capture TV plane first — then magenta shows fitted surface slab"
+    cv2.putText(
+        bgr, hint[: min(len(hint), 95)], (8, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.28, (180, 220, 255), 1, cv2.LINE_AA,
     )
 
     # Readable size in browser (~2x native)

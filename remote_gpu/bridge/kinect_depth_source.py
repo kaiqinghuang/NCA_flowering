@@ -7,6 +7,7 @@ Debug preview still uses color when available.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Callable, Optional
@@ -32,6 +33,7 @@ class KinectDepthSource:
         self.band_min_m = band_min_m
         self.band_max_m = band_max_m
         self.pinch_eigen_ratio = pinch_eigen_ratio
+        self._debug_surface_eps_m = float(os.environ.get("BRIDGE_DEBUG_SURFACE_EPS_M", "0.03"))
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.started_ok = False
@@ -254,7 +256,12 @@ class KinectDepthSource:
             import cv2
 
             bgr = render_depth_debug_bgr(
-                depth_flat, plane, self.band_min_m, self.band_max_m, res,
+                depth_flat,
+                plane,
+                self.band_min_m,
+                self.band_max_m,
+                res,
+                surface_eps_m=self._debug_surface_eps_m,
             )
             ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
             if ok:

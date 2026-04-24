@@ -68,7 +68,10 @@ python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
 Then you should see `[kinect] Runtime started; waiting for body frames.` and body-frame lines.
 
 **Live debug (browser “Debug View: On”)**: `GET /debug/color.jpg` (RGB) and
-`GET /debug/depth.jpg` (depth colormap + green plane band + fingertip cross).
+`GET /debug/depth.jpg` (TURBO depth + **magenta** = within ~3cm of the fitted TV plane,
+**green** = interaction shell in front of the plane, cross = fingertip).
+
+Optional: `BRIDGE_DEBUG_SURFACE_EPS_M` (default `0.03`) widens/narrows the magenta “TV slab” in meters.
 
 If you see `PyKinect2 import failed` the bridge keeps running but emits no
 hand frames — install PyKinect2 and the Kinect SDK.
