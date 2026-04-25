@@ -1,9 +1,15 @@
-"""Kinect v2 depth-based hand blob → fingertip (no body skeleton).
+"""Unified Kinect v2 runtime: Body (for TV calibration) + Depth (for runtime).
 
-Requires a fitted TV plane (`plane.json`) for best segmentation; see
-`PlaneCalibration` + WS op `capture_tv_plane`.
+Opens **Body | Depth** so we can:
 
-Debug preview still uses color when available.
+* Stream `HandTipRight` 3D position from the SDK skeleton — used by the manual
+  4-corner TV calibration wizard (one click per corner).
+* Process the depth frame inside the calibrated TV interaction box to find a
+  fingertip (point with smallest signed distance to the TV plane) — used at
+  runtime to drive the canvas brush.
+
+The RGB color stream is **not** opened (saves USB bandwidth and CPU; the old
+debug-color JPEG was removed in the depth-first redesign).
 """
 from __future__ import annotations
 
@@ -14,38 +20,44 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .depth_processing import process_depth_frame, render_depth_debug_bgr
+from .depth_processing import analyze_depth_frame, render_depth_debug_bgr
 from .kinect_source import HAND_STATE_NOT_TRACKED, HAND_STATE_OPEN, RawHandFrame
-from .plane_calibration import PlaneCalibration, PlaneModel
 
 
 class KinectDepthSource:
     def __init__(
         self,
         on_frame: Callable[[RawHandFrame], None],
-        plane_cal: PlaneCalibration,
-        band_min_m: float = 0.02,
-        band_max_m: float = 0.40,
-        pinch_eigen_ratio: float = 2.8,
+        tv_cal,                        # TVCalibration instance — shared with main.py
+        box_near_m: float = 0.02,
+        box_far_m: float = 0.45,
+        surface_eps_m: Optional[float] = None,
     ):
         self.on_frame = on_frame
-        self.plane_cal = plane_cal
-        self.band_min_m = band_min_m
-        self.band_max_m = band_max_m
-        self.pinch_eigen_ratio = pinch_eigen_ratio
-        self._debug_surface_eps_m = float(os.environ.get("BRIDGE_DEBUG_SURFACE_EPS_M", "0.03"))
+        self.tv_cal = tv_cal
+        self.box_near_m = float(box_near_m)
+        self.box_far_m = float(box_far_m)
+        self._surface_eps_m = (
+            float(surface_eps_m)
+            if surface_eps_m is not None
+            else float(os.environ.get("BRIDGE_DEBUG_SURFACE_EPS_M", "0.03"))
+        )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.started_ok = False
-        self._debug_jpeg: Optional[bytes] = None
-        self._debug_depth_jpeg: Optional[bytes] = None
-        self._debug_lock = threading.Lock()
-        self._debug_frame_idx = 0
-        self._plane_capture = threading.Event()
-        self._pending_msgs: list[dict] = []
-        self._pending_lock = threading.Lock()
-        self._plane_capture_buf: list[np.ndarray] = []
 
+        self._debug_lock = threading.Lock()
+        self._debug_depth_jpeg: Optional[bytes] = None
+
+        self._body_lock = threading.Lock()
+        self._latest_body_tip: Optional[tuple] = None
+        self._latest_body_tracked: bool = False
+        self._latest_body_t: float = 0.0
+
+        self._pending_lock = threading.Lock()
+        self._pending_msgs: list[dict] = []
+
+    # ---------- public API ----------
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="kinect-depth")
         self._thread.start()
@@ -55,18 +67,19 @@ class KinectDepthSource:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
-    def get_debug_jpeg(self) -> Optional[bytes]:
-        with self._debug_lock:
-            return self._debug_jpeg
-
     def get_debug_depth_jpeg(self) -> Optional[bytes]:
         with self._debug_lock:
             return self._debug_depth_jpeg
 
-    def request_plane_capture(self) -> None:
-        """Signal the depth thread to grab ~1s of frames and fit / save the plane."""
-        self._plane_capture_buf.clear()
-        self._plane_capture.set()
+    def get_latest_body_tip(self) -> Optional[tuple]:
+        """Most recent SDK HandTipRight 3D position (or None if no body tracked)."""
+        with self._body_lock:
+            if self._latest_body_tip is None:
+                return None
+            # Stale guard: drop if older than ~0.4s
+            if time.time() - self._latest_body_t > 0.4:
+                return None
+            return tuple(self._latest_body_tip)
 
     def drain_pending_msgs(self) -> list[dict]:
         with self._pending_lock:
@@ -78,6 +91,7 @@ class KinectDepthSource:
         with self._pending_lock:
             self._pending_msgs.append(msg)
 
+    # ---------- runtime thread ----------
     def _apply_pykinect_compat_shims(self) -> None:
         if not hasattr(time, "clock"):
             time.clock = time.perf_counter  # type: ignore[attr-defined]
@@ -90,7 +104,12 @@ class KinectDepthSource:
     def _run(self) -> None:
         self._apply_pykinect_compat_shims()
         try:
-            from pykinect2.PyKinectV2 import FrameSourceTypes_Color, FrameSourceTypes_Depth
+            from pykinect2.PyKinectV2 import (
+                FrameSourceTypes_Body,
+                FrameSourceTypes_Depth,
+                JointType_HandTipRight,
+                TrackingState_Tracked,
+            )
             from pykinect2 import PyKinectRuntime
         except Exception as e:  # noqa: BLE001
             print(f"[kinect-depth] PyKinect2 import failed: {e}")
@@ -99,7 +118,7 @@ class KinectDepthSource:
 
         try:
             runtime = PyKinectRuntime.PyKinectRuntime(
-                FrameSourceTypes_Depth | FrameSourceTypes_Color
+                FrameSourceTypes_Body | FrameSourceTypes_Depth
             )
         except Exception as e:  # noqa: BLE001
             print(f"[kinect-depth] Failed to open Kinect runtime: {e}")
@@ -107,25 +126,38 @@ class KinectDepthSource:
             return
 
         self.started_ok = True
-        print("[kinect-depth] Runtime started (depth + color).")
-        color_shape = (1080, 1920, 4)
+        print("[kinect-depth] Runtime started (body + depth).")
+
         last_debug_push = 0.0
-        last_depth_debug_push = 0.0
 
         while not self._stop.is_set():
-            if self._plane_capture.is_set():
-                self._do_plane_capture(runtime)
-                self._plane_capture.clear()
-
-            if runtime.has_new_color_frame():
+            # ----- Body frame (cheap, run every loop iter when present) -----
+            if runtime.has_new_body_frame():
                 try:
-                    cf = runtime.get_last_color_frame()
-                    if cf is not None:
-                        self._update_debug_jpeg(cf, color_shape, time.time(), last_debug_push)
-                        last_debug_push = time.time()
-                except Exception:
+                    bodies = runtime.get_last_body_frame()
+                    if bodies is not None:
+                        tip_xyz: Optional[tuple] = None
+                        tip_tracked = False
+                        for i in range(6):
+                            b = bodies.bodies[i]
+                            if not b.is_tracked:
+                                continue
+                            j = b.joints[JointType_HandTipRight]
+                            tip_xyz = (
+                                float(j.Position.x),
+                                float(j.Position.y),
+                                float(j.Position.z),
+                            )
+                            tip_tracked = j.TrackingState == TrackingState_Tracked
+                            break
+                        with self._body_lock:
+                            self._latest_body_tip = tip_xyz
+                            self._latest_body_tracked = tip_tracked
+                            self._latest_body_t = time.time()
+                except Exception:  # noqa: BLE001
                     pass
 
+            # ----- Depth frame (drives RawHandFrame emission) -----
             if not runtime.has_new_depth_frame():
                 time.sleep(0.002)
                 continue
@@ -135,54 +167,66 @@ class KinectDepthSource:
                 continue
 
             depth_flat = np.asarray(depth, dtype=np.uint16).ravel()
-            plane: Optional[PlaneModel] = self.plane_cal.plane
-            res = process_depth_frame(
+
+            analysis = analyze_depth_frame(
                 depth_flat,
-                plane,
-                band_min_m=self.band_min_m,
-                band_max_m=self.band_max_m,
-                pinch_eigen_ratio_thresh=self.pinch_eigen_ratio,
+                self.tv_cal,
+                box_near_m=self.box_near_m,
+                box_far_m=self.box_far_m,
+                surface_eps_m=self._surface_eps_m,
             )
 
-            now = time.time()
-            if now - last_depth_debug_push > 0.07:
-                last_depth_debug_push = now
-                self._update_depth_debug_jpeg(depth_flat, plane, res)
+            with self._body_lock:
+                body_tip_snapshot = self._latest_body_tip
+                body_tracked_snapshot = self._latest_body_tracked
 
-            if not res.tracked:
+            now = time.time()
+            if now - last_debug_push > 0.07:
+                last_debug_push = now
+                self._update_depth_debug_jpeg(depth_flat, analysis, body_tip_snapshot)
+
+            res = analysis["result"]
+            if res.tracked:
                 self._emit(RawHandFrame(
-                    t=now, tracked=False,
-                    hand_pos=(0.0, 0.0, 0.0), thumb_pos=(0.0, 0.0, 0.0),
+                    t=now,
+                    tracked=True,
+                    hand_pos=res.tip_xyz,
+                    thumb_pos=res.tip_xyz,
+                    wrist_pos=res.tip_xyz,
+                    hand_state=HAND_STATE_OPEN,
+                    confident=res.confident,
+                    hand_color=(res.debug_uv_tip[0], res.debug_uv_tip[1]),
+                    thumb_color=(-1.0, -1.0),
+                    wrist_color=(-1.0, -1.0),
+                    pinch_raw_direct=True,            # always "drawing" while in interaction box
+                    pinch_dist_direct_m=res.tip_signed_dist_m,
+                    body_tip_xyz=body_tip_snapshot,
+                    body_tracked=body_tracked_snapshot,
+                ))
+            else:
+                self._emit(RawHandFrame(
+                    t=now,
+                    tracked=False,
+                    hand_pos=(0.0, 0.0, 0.0),
+                    thumb_pos=(0.0, 0.0, 0.0),
                     wrist_pos=(0.0, 0.0, 0.0),
                     hand_state=HAND_STATE_NOT_TRACKED,
                     confident=False,
-                    hand_color=(-1.0, -1.0), thumb_color=(-1.0, -1.0), wrist_color=(-1.0, -1.0),
+                    hand_color=(-1.0, -1.0),
+                    thumb_color=(-1.0, -1.0),
+                    wrist_color=(-1.0, -1.0),
+                    pinch_raw_direct=False,
+                    pinch_dist_direct_m=-1.0,
+                    body_tip_xyz=body_tip_snapshot,
+                    body_tracked=body_tracked_snapshot,
                 ))
-                continue
-
-            tip = res.tip_xyz
-            thumb = res.thumb_proxy_xyz
-            # Map depth (u,v) to fake "color" coords for debug overlay scaling in client.
-            du, dv = res.debug_uv_tip
-            hc = (du * (1920.0 / 512.0), dv * (1080.0 / 424.0)) if du >= 0 else (-1.0, -1.0)
-            tc = hc
-            wc = hc
-
-            self._emit(RawHandFrame(
-                t=now, tracked=True,
-                hand_pos=tip, thumb_pos=thumb, wrist_pos=thumb,
-                hand_state=HAND_STATE_OPEN,
-                confident=res.confident,
-                hand_color=hc, thumb_color=tc, wrist_color=wc,
-                pinch_raw_direct=res.pinch_raw,
-                pinch_dist_direct_m=res.pinch_dist_m,
-            ))
 
         try:
             runtime.close()
         except Exception:  # noqa: BLE001
             pass
 
+    # ---------- helpers ----------
     def _emit(self, frame: RawHandFrame) -> None:
         try:
             self.on_frame(frame)
@@ -200,72 +244,27 @@ class KinectDepthSource:
             ))
             time.sleep(0.1)
 
-    def _do_plane_capture(self, runtime) -> None:
-        """Grab depth frames without requiring a new PyKinect API."""
-        buf: list[np.ndarray] = []
-        t0 = time.time()
-        while time.time() - t0 < 1.2 and len(buf) < 35 and not self._stop.is_set():
-            if runtime.has_new_depth_frame():
-                d = runtime.get_last_depth_frame()
-                if d is not None:
-                    buf.append(np.asarray(d, dtype=np.uint16).copy())
-            time.sleep(0.028)
-        if len(buf) < 8:
-            self._push_msg({"op": "plane_capture_failed", "reason": "not enough depth frames"})
-            return
-        from .depth_processing import fit_plane_from_depth_stack
-
-        plane = fit_plane_from_depth_stack(buf)
-        if plane is None:
-            self._push_msg({"op": "plane_capture_failed", "reason": "ransac failed"})
-            return
-        self.plane_cal.save(plane)
-        self._push_msg({"op": "plane_ready", "a": plane.a, "b": plane.b, "c": plane.c, "d": plane.d})
-
-    def _update_debug_jpeg(
-        self, flat_color_frame, color_shape, now: float, last_ref: float,
-    ) -> None:
-        if now - last_ref < 0.09:
-            return
-        try:
-            import cv2
-            arr = np.asarray(flat_color_frame, dtype=np.uint8).reshape(color_shape)
-            bgr = arr[:, :, :3]
-            small = cv2.resize(bgr, (640, 360), interpolation=cv2.INTER_AREA)
-            self._debug_frame_idx += 1
-            stamp = f"depth#{self._debug_frame_idx}  plane={'ok' if self.plane_cal.ready else 'no'}"
-            cv2.rectangle(small, (8, 8), (420, 36), (0, 0, 0), -1)
-            cv2.putText(
-                small, stamp, (12, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (40, 255, 120), 1, cv2.LINE_AA,
-            )
-            ok, enc = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
-            if ok:
-                with self._debug_lock:
-                    self._debug_jpeg = enc.tobytes()
-        except Exception:
-            return
-
     def _update_depth_debug_jpeg(
         self,
         depth_flat: np.ndarray,
-        plane: Optional[PlaneModel],
-        res,
+        analysis: dict,
+        body_tip_xyz: Optional[tuple],
     ) -> None:
         try:
             import cv2
 
             bgr = render_depth_debug_bgr(
                 depth_flat,
-                plane,
-                self.band_min_m,
-                self.band_max_m,
-                res,
-                surface_eps_m=self._debug_surface_eps_m,
+                self.tv_cal,
+                analysis=analysis,
+                body_tip_xyz=body_tip_xyz,
+                box_near_m=self.box_near_m,
+                box_far_m=self.box_far_m,
+                surface_eps_m=self._surface_eps_m,
             )
             ok, enc = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
             if ok:
                 with self._debug_lock:
                     self._debug_depth_jpeg = enc.tobytes()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return

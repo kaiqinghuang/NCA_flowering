@@ -1,9 +1,20 @@
 # Kinect v2 Bridge (`remote_gpu/bridge`)
 
-Local process that reads the Kinect's right-hand joint tracking and exposes it
-as a WebSocket the NCA browser client can subscribe to. Converts `HandTipRight`
-and `ThumbRight` into canvas (x, y) + pinch state, so the existing brush
-protocol (`stamp` / `stroke`) gets driven by gesture instead of the mouse.
+Local Windows process that turns a Kinect v2 into a fingertip cursor for the
+NCA browser client. The runtime is **depth-first**:
+
+* The TV lies flat (or at any orientation) and the Kinect is mounted at TV
+  height, slightly tilted toward the screen.
+* You manually point your **right hand (HandTipRight)** at each of the four
+  TV corners and press **Confirm** for each — that single capture defines
+  both the TV's 3D plane *and* the homography that maps real-world
+  fingertip positions onto the canvas. No hidden RANSAC, no auto-fit.
+* At runtime, the bridge ignores the SDK skeleton: the depth frame is
+  filtered by *(inside the calibrated TV polygon) ∧ (signed distance to
+  plane within `[0.02, 0.45]`m)*, and the **fingertip = pixel closest to
+  the screen along the plane normal**. While a fingertip exists in the
+  interaction box, the bridge emits `pinch=true` so the canvas paints
+  continuously.
 
 ```
 ┌────────────────────── Windows laptop ──────────────────────┐
@@ -15,9 +26,8 @@ protocol (`stamp` / `stroke`) gets driven by gesture instead of the mouse.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Mouse input is **not** disabled — the bridge just adds gesture input in
-parallel. If the bridge is unreachable the browser silently falls back to
-mouse-only.
+The mouse path is unaffected; if the bridge is unreachable the page falls
+back to mouse only.
 
 ## Requirements
 
@@ -44,63 +54,69 @@ pip install -r bridge/requirements.txt
 python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
 ```
 
-### Default: depth mode (no body / hand skeleton)
+Default mode is `depth` (Body+Depth opened together: Body for the
+calibration wizard, Depth for the runtime fingertip). To run the legacy
+SDK-only body mode (no depth, no debug image) set:
 
-By default the bridge uses the 512×424 depth map: band in front of the TV plane → largest blob → fingertip (furthest from centroid) + geometric pinch (local point-cloud elongation).
-
-1. In the browser Kinect panel, click **Fit TV plane (depth)** with **hands out of view** (~1.2s capture).
-2. Then run the usual **Calibrate** four corners (pinch-hold) so `(x,z)` maps to the canvas.
+```powershell
+set BRIDGE_KINECT_MODE=body
+```
 
 Expected boot log:
 
 ```
-[kinect-depth] Runtime started (depth + color).
-[bridge] Kinect mode: depth  ...
+[bridge] Kinect mode: depth (body+depth, depth fingertip)
+[kinect-depth] Runtime started (body + depth).
+[bridge] canvas=960x540  mode=depth  box=[0.02,0.45]m  tv_ready=no  listening on ws://0.0.0.0:7000/ws
 ```
-
-To use the **Kinect SDK body / joint** tracking instead, set:
-
-```powershell
-set BRIDGE_KINECT_MODE=body
-python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
-```
-
-Then you should see `[kinect] Runtime started; waiting for body frames.` and body-frame lines.
-
-**Live debug (browser “Debug View: On”)**: `GET /debug/color.jpg` (RGB) and
-`GET /debug/depth.jpg` (TURBO depth + **magenta** = within ~3cm of the fitted TV plane,
-**green** = interaction shell in front of the plane, cross = fingertip).
-
-Optional: `BRIDGE_DEBUG_SURFACE_EPS_M` (default `0.03`) widens/narrows the magenta “TV slab” in meters.
 
 If you see `PyKinect2 import failed` the bridge keeps running but emits no
 hand frames — install PyKinect2 and the Kinect SDK.
 
-## Calibration
+## TV Calibration (one-time)
 
-1. Open the NCA browser client (the main remote_gpu site).
-2. Bridge status panel appears when `ws://localhost:7000/ws` connects.
-3. Click **Calibrate** → the 4 canvas corners light up one at a time (TL → TR → BR → BL).
-4. For each corner: move your right hand above that corner of the TV,
-   **pinch and hold** (thumb + index touching or a firm fist) for ~½ second,
-   then release. The bridge records the median 3D position during the hold.
-5. After the 4th corner the homography saves to `calibration.json` next to
-   this README. Until you reset, the bridge always applies this calibration.
+Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
 
-### Re-calibrate
+1. Click **Start TV Calibration**. The wizard panel appears.
+2. Stand in front of the Kinect so it sees your right arm — the wizard
+   shows `SDK body OK` in green when `HandTipRight` is being tracked.
+3. For each corner (order: **TL → TR → BR → BL**):
+   * point your **right hand fingertip** at that physical corner of the TV,
+   * hold steady,
+   * click **Confirm Corner**.
+   The wizard advances to the next corner automatically.
+4. After the 4th confirm, the bridge fits a plane through the 4 captured
+   points (SVD), builds an in-plane (u, v) basis, and solves a homography
+   from the corner (u, v) to the canvas corners. The result is saved to
+   `tv_calibration.json` next to this README.
 
-Browser button **Reset calibration** or delete `calibration.json`.
+While capturing, **Redo** discards the last corner. **Cancel** aborts
+without saving. **Reset TV Calibration** deletes the saved file.
+
+### Verifying the fit
+
+Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
+
+| color | meaning |
+|-------|---------|
+| TURBO pseudo-color | raw depth |
+| **magenta polygon outline** | the 4 captured corners projected to the depth image |
+| **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon — should align with the physical TV |
+| **light green** | the interaction box: pixels in the plane-normal slab `[BRIDGE_DEPTH_BAND_MIN_M, BRIDGE_DEPTH_BAND_MAX_M]` *and* inside the polygon |
+| **yellow circle** | live SDK `HandTipRight` (handy during calibration) |
+| **white cross + ring** | the depth-derived fingertip used at runtime (closest-to-plane median of the K nearest pixels) |
 
 ## Tuning (env vars)
 
 | Var | Default | Effect |
 |---|---|---|
-| `BRIDGE_PORT` | 7000 | local WS port |
-| `BRIDGE_CANVAS_W` / `_H` | 960 / 540 | must match NCA server `NCA_W/H` |
-| `BRIDGE_EMA_ALPHA` | 0.35 | cursor smoothing (lower = smoother / laggier) |
-| `BRIDGE_PINCH_DIST_M` | 0.03 | thumb-index distance threshold for pinch |
-| `BRIDGE_DEBOUNCE` | 1 | extra frames of agreement before pinch state flips |
-| `BRIDGE_BROADCAST_HZ` | 30 | outgoing event rate |
+| `BRIDGE_PORT` | `7000` | local WS port |
+| `BRIDGE_CANVAS_W` / `_H` | `960` / `540` | must match NCA server `NCA_W/H` |
+| `BRIDGE_BROADCAST_HZ` | `30` | outgoing hand-event rate |
+| `BRIDGE_KINECT_MODE` | `depth` | `depth` (default) or `body` (legacy SDK only) |
+| `BRIDGE_DEPTH_BAND_MIN_M` | `0.02` | near edge of the interaction box (m above plane) |
+| `BRIDGE_DEPTH_BAND_MAX_M` | `0.45` | far edge of the interaction box (m above plane) |
+| `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
 
 ## Protocol (for reference)
 
@@ -109,18 +125,24 @@ Every broadcast frame:
 ```json
 {
   "op": "hand",
+  "t": 1734123456.789,
   "tracked": true,
   "confident": true,
-  "cal_ready": true,
-  "cal_mode": "idle",
-  "cal_status": {"state": "idle"},
+  "tv_ready": true,
+  "tv_status": {"mode": "idle", "ready": true, "current_corner": 0,
+                "label": "TL", "captured": 0, "total": 4,
+                "labels": ["TL", "TR", "BR", "BL"]},
+  "body_tip_xyz": [0.18, -0.12, 1.42],
+  "body_tracked": true,
+  "tip_signed_dist_m": 0.083,
   "cx": 481.2,
   "cy": 270.7,
-  "pinch": false,
-  "t": 1734123456.789
+  "pinch": true
 }
 ```
 
-Calibration state machine messages: `cal_started`, `cal_cancelled`,
-`cal_reset`, plus per-frame `cal_status` inside every `hand` message while
-`cal_mode == "capturing"` (fields: `state`, `corner`, `label`, `samples`, …).
+Calibration wizard ops (browser → bridge): `tv_calib_start`,
+`tv_calib_confirm`, `tv_calib_redo`, `tv_calib_cancel`,
+`tv_calib_reset`. Bridge → browser broadcasts: `tv_calib_started`,
+`tv_calib_progress`, `tv_calib_done`, `tv_calib_cancelled`,
+`tv_calib_reset`.

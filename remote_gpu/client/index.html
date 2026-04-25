@@ -87,16 +87,20 @@
   .k-debug-wrap.hidden { display: none; }
   .k-debug-stage { position: relative; width: 100%;
                    background: #000; border-radius: 4px; overflow: hidden; }
-  .k-debug-stage-color { aspect-ratio: 16 / 9; }
-  .k-debug-stage-depth { aspect-ratio: 512 / 424; margin-top: 4px; }
-  .k-debug-feed-label { font-size: 10px; color: #888; margin-top: 6px; margin-bottom: 2px; }
-  #kinectDebugImg, #kinectDebugCanvas, #kinectDebugDepthImg {
+  .k-debug-stage-depth { aspect-ratio: 512 / 424; }
+  .k-debug-feed-label { font-size: 10px; color: #888; margin-top: 4px; margin-bottom: 2px; }
+  #kinectDebugDepthImg {
     position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    object-fit: contain; image-rendering: pixelated; background: #080808;
   }
-  #kinectDebugImg { object-fit: cover; image-rendering: auto; }
-  #kinectDebugDepthImg { object-fit: contain; image-rendering: pixelated; background: #080808; }
-  #kinectDebugCanvas { pointer-events: none; }
   #kinectDebugStats { margin-top: 6px; font-size: 11px; color: #aaa; line-height: 1.35; }
+  .tv-cal-panel { margin-top: 6px; padding: 6px 8px; border: 1px solid #3a3a3a;
+                  border-radius: 6px; background: #161616; }
+  .tv-cal-panel.hidden { display: none; }
+  .tv-cal-step { font-size: 12px; color: #ddd; margin-bottom: 4px; }
+  .tv-cal-step b { color: #ffd24a; }
+  .tv-cal-bodyok { font-size: 11px; color: #7c7; }
+  .tv-cal-bodybad { font-size: 11px; color: #e77; }
 </style>
 </head>
 <body>
@@ -157,37 +161,46 @@
     <div class="panel">
       <h3>Kinect</h3>
       <div class="row"><span id="kinectStatus" class="kinect-status">Not connected</span></div>
-      <div class="row" style="gap:6px;">
-        <button class="btn" id="calBtn" style="flex:1;">Calibrate</button>
-        <button class="btn" id="calCancelBtn" style="flex:1;" disabled>Cancel</button>
+      <div class="row"><span id="tvCalStatusText" class="kinect-status" style="color:#aaa;">TV: not calibrated</span></div>
+
+      <div class="row" style="gap:6px; margin-top:4px;">
+        <button class="btn" id="tvCalStartBtn" style="flex:1;">Start TV Calibration</button>
       </div>
-      <div class="row" style="gap:6px;">
-        <button class="btn" id="calResetBtn" style="flex:1;">Reset calibration</button>
+
+      <div id="tvCalPanel" class="tv-cal-panel hidden">
+        <div class="tv-cal-step" id="tvCalStepText">Step 1 / 4: <b>top-left</b></div>
+        <div id="tvCalBodyHint" class="tv-cal-bodybad">SDK body not visible — stand in view</div>
+        <div class="row" style="gap:6px; margin-top:4px;">
+          <button class="btn" id="tvCalConfirmBtn" style="flex:2;">Confirm Corner</button>
+          <button class="btn" id="tvCalRedoBtn" style="flex:1;" disabled>Redo</button>
+        </div>
+        <div class="row" style="gap:6px; margin-top:4px;">
+          <button class="btn" id="tvCalCancelBtn" style="flex:1;">Cancel</button>
+        </div>
       </div>
+
       <div class="row" style="gap:6px; margin-top:6px;">
-        <button class="btn" id="planeFitBtn" style="flex:1;" title="Depth mode only: clear hands from view, then capture TV surface">
-          Fit TV plane (depth)
-        </button>
+        <button class="btn" id="tvCalResetBtn" style="flex:1;">Reset TV Calibration</button>
       </div>
+
       <div class="help" style="margin-top:6px;">
-        Pinch (thumb + index) to paint with the selected brush.
-        Calibration: pinch &amp; hold over each highlighted corner for ~½ second.
+        Aim your <b>right hand</b> (HandTipRight) at each TV corner, hold steady, then click
+        <b>Confirm</b>. Order: <b>TL → TR → BR → BL</b>. After 4 corners are saved, the
+        depth-driven fingertip in the interaction box (above the TV) will draw onto the canvas.
         <span id="kinectModeHelp" style="display:block;margin-top:4px;color:#777;"></span>
       </div>
       <div class="row" style="gap:6px; margin-top:8px;">
         <button class="btn" id="kDebugToggleBtn" style="flex:1;">Debug View: Off</button>
       </div>
       <div id="kDebugWrap" class="k-debug-wrap hidden">
-        <div class="k-debug-feed-label">RGB (color camera)</div>
-        <div class="k-debug-stage k-debug-stage-color">
-          <img id="kinectDebugImg" alt="kinect color stream">
-          <canvas id="kinectDebugCanvas" width="320" height="180"></canvas>
+        <div class="k-debug-feed-label">
+          Depth — magenta polygon = calibrated TV; magenta fill = pixels on plane;
+          green = interaction box; yellow = SDK HandTipRight; white = depth fingertip
         </div>
-        <div class="k-debug-feed-label">Depth — magenta = pixels within ~3cm of fitted TV plane (should match real TV) · green = hand shell · cross = tip</div>
         <div class="k-debug-stage k-debug-stage-depth">
           <img id="kinectDebugDepthImg" alt="depth debug stream">
         </div>
-        <div id="kinectDebugStats">tracked: - | confident: - | pinch: - | dist: -</div>
+        <div id="kinectDebugStats">tracked: - | tv: - | tip: -</div>
       </div>
     </div>
 
@@ -778,25 +791,25 @@ var BRIDGE_URL = (function() {
 
 var bridgeWs = null;
 var bridgeReady = false;
-var calibrationMode = false;
 var bridgeKinectMode = 'depth';
-var bridgePlaneReady = false;
+var bridgeTvReady = false;
+var bridgeTvStatus = { mode: 'idle', current_corner: 0, captured: 0, total: 4 };
 var bridgeStatusEl = document.getElementById('kinectStatus');
-var calBtn = document.getElementById('calBtn');
-var calCancelBtn = document.getElementById('calCancelBtn');
-var calResetBtn = document.getElementById('calResetBtn');
+var tvCalStatusTextEl = document.getElementById('tvCalStatusText');
+var tvCalStartBtn = document.getElementById('tvCalStartBtn');
+var tvCalPanel = document.getElementById('tvCalPanel');
+var tvCalStepText = document.getElementById('tvCalStepText');
+var tvCalBodyHint = document.getElementById('tvCalBodyHint');
+var tvCalConfirmBtn = document.getElementById('tvCalConfirmBtn');
+var tvCalRedoBtn = document.getElementById('tvCalRedoBtn');
+var tvCalCancelBtn = document.getElementById('tvCalCancelBtn');
+var tvCalResetBtn = document.getElementById('tvCalResetBtn');
 var calOverlayEl = document.getElementById('calOverlay');
 var kDebugToggleBtn = document.getElementById('kDebugToggleBtn');
 var kDebugWrap = document.getElementById('kDebugWrap');
-var kinectDebugImg = document.getElementById('kinectDebugImg');
 var kinectDebugDepthImg = document.getElementById('kinectDebugDepthImg');
-var kinectDebugCanvas = document.getElementById('kinectDebugCanvas');
-var kinectDebugCtx = kinectDebugCanvas ? kinectDebugCanvas.getContext('2d') : null;
 var kinectDebugStats = document.getElementById('kinectDebugStats');
 var kDebugEnabled = false;
-var kDebugTimer = null;
-var kDebugInflight = false;
-var kDebugBaseUrl = '';
 var kDebugDepthInflight = false;
 var kDebugDepthBaseUrl = '';
 var kDebugDepthTimer = null;
@@ -823,12 +836,6 @@ function bridgeToHttpRoot(wsUrl) {
 }
 
 function bridgeDebugDepthImageBase(wsUrl) {
-  var c = bridgeDebugImageBase(wsUrl);
-  if (!c) return '';
-  return c.replace('/debug/color.jpg', '/debug/depth.jpg');
-}
-
-function bridgeDebugImageBase(wsUrl) {
   if (!wsUrl || typeof wsUrl !== 'string') return '';
   try {
     var u = new URL(wsUrl);
@@ -839,7 +846,7 @@ function bridgeDebugImageBase(wsUrl) {
     if (p.endsWith('/ws')) p = p.slice(0, -3);
     if (!p) p = '/';
     if (p[p.length - 1] !== '/') p += '/';
-    var base = httpProto + '//' + u.host + p + 'debug/color.jpg';
+    var base = httpProto + '//' + u.host + p + 'debug/depth.jpg';
     // Preserve query parameters (e.g. RunPod token) required by the bridge ingress.
     if (u.search && u.search.length > 1) base += u.search;
     return base;
@@ -853,34 +860,15 @@ function setKDebugEnabled(enabled) {
   if (kDebugToggleBtn) kDebugToggleBtn.textContent = 'Debug View: ' + (kDebugEnabled ? 'On' : 'Off');
   if (kDebugWrap) kDebugWrap.classList.toggle('hidden', !kDebugEnabled);
   if (!kDebugEnabled) {
-    if (kDebugTimer !== null) {
-      clearInterval(kDebugTimer);
-      kDebugTimer = null;
-    }
     if (kDebugDepthTimer !== null) {
       clearTimeout(kDebugDepthTimer);
       kDebugDepthTimer = null;
     }
-    kDebugInflight = false;
-    kDebugBaseUrl = '';
     kDebugDepthInflight = false;
     kDebugDepthBaseUrl = '';
-    if (kinectDebugCtx) kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
-    if (kinectDebugImg) kinectDebugImg.removeAttribute('src');
     if (kinectDebugDepthImg) kinectDebugDepthImg.removeAttribute('src');
     return;
   }
-  var debugBase = bridgeDebugImageBase(BRIDGE_URL);
-  if (!debugBase || !kinectDebugImg) return;
-  kDebugBaseUrl = debugBase;
-  kDebugInflight = false;
-  if (kDebugTimer !== null) {
-    clearInterval(kDebugTimer);
-    kDebugTimer = null;
-  }
-  // Pull debug frames sequentially: wait previous load/error before next request.
-  requestKinectDebugFrame();
-
   kDebugDepthBaseUrl = bridgeDebugDepthImageBase(BRIDGE_URL) || '';
   kDebugDepthInflight = false;
   if (kDebugDepthTimer !== null) {
@@ -890,37 +878,6 @@ function setKDebugEnabled(enabled) {
   if (kinectDebugDepthImg && kDebugDepthBaseUrl) {
     requestKinectDebugFrameDepth();
   }
-}
-
-function requestKinectDebugFrame() {
-  if (!kDebugEnabled || !kinectDebugImg || !kDebugBaseUrl) return;
-  if (kDebugInflight) return;
-  kDebugInflight = true;
-  var sep = (kDebugBaseUrl.indexOf('?') >= 0) ? '&' : '?';
-  kinectDebugImg.src = kDebugBaseUrl + sep + 't=' + Date.now();
-}
-
-function scheduleNextKinectDebugFrame() {
-  if (!kDebugEnabled) return;
-  if (kDebugTimer !== null) clearTimeout(kDebugTimer);
-  kDebugTimer = setTimeout(function() {
-    requestKinectDebugFrame();
-  }, kDebugPollMs);
-}
-
-if (kinectDebugImg) {
-  kinectDebugImg.onload = function() {
-    kDebugInflight = false;
-    scheduleNextKinectDebugFrame();
-  };
-  kinectDebugImg.onerror = function() {
-    kDebugInflight = false;
-    if (kinectDebugStats) {
-      kinectDebugStats.textContent =
-        'color debug failed — check /debug/color.jpg | depth uses /debug/depth.jpg';
-    }
-    scheduleNextKinectDebugFrame();
-  };
 }
 
 function requestKinectDebugFrameDepth() {
@@ -946,6 +903,9 @@ if (kinectDebugDepthImg) {
   };
   kinectDebugDepthImg.onerror = function() {
     kDebugDepthInflight = false;
+    if (kinectDebugStats) {
+      kinectDebugStats.textContent = 'depth debug failed — check /debug/depth.jpg';
+    }
     scheduleNextKinectDebugFrameDepth();
   };
 }
@@ -981,9 +941,8 @@ function connectBridge() {
     bridgeReady = false;
     setBridgeStatus('Bridge disconnected — retry in 3s', 'warn');
     clearOverlay();
-    hideCalibrationOverlay();
+    hideTvCalOverlay();
     if (kDebugEnabled) setKDebugEnabled(false);
-    calibrationMode = false;
     setTimeout(connectBridge, 3000);
   };
   bridgeWs.onmessage = function(ev) {
@@ -993,46 +952,62 @@ function connectBridge() {
   };
 }
 
+function applyKinectStatus(kinectOk, helloLike) {
+  var modeHelp = document.getElementById('kinectModeHelp');
+  if (modeHelp) {
+    modeHelp.textContent = bridgeKinectMode === 'depth'
+      ? ('Mode: depth (Body+Depth) | TV: ' + (bridgeTvReady ? 'calibrated' : 'NOT calibrated — run wizard'))
+      : ('Mode: body (SDK only) | TV: n/a');
+  }
+  setBridgeStatus(
+    kinectOk
+      ? ('Bridge connected — Kinect OK | mode: ' + bridgeKinectMode +
+         ' | tv: ' + (bridgeTvReady ? 'ok' : 'no'))
+      : 'Bridge connected — Kinect not found',
+    kinectOk ? 'ok' : 'warn'
+  );
+  applyTvCalStatusUI();
+}
+
 function handleBridgeMsg(m) {
   var op = m.op;
   if (op === 'hello') {
     bridgeKinectMode = m.kinect_mode || 'depth';
-    bridgePlaneReady = !!m.plane_ready;
-    var modeHelp = document.getElementById('kinectModeHelp');
-    if (modeHelp) {
-      modeHelp.textContent = bridgeKinectMode === 'depth'
-        ? ('Tracking: depth blobs | TV plane: ' + (bridgePlaneReady ? 'ready' : 'NOT fitted — use “Fit TV plane”'))
-        : ('Tracking: SDK body joints | TV plane: n/a');
-    }
-    var kinectOk = !!m.kinect_ok;
-    setBridgeStatus(kinectOk
-      ? ('Bridge connected — Kinect OK' + (m.cal_ready ? ', calibrated' : ', NOT calibrated')
-        + ' | mode: ' + bridgeKinectMode + (bridgeKinectMode === 'depth' ? (' | plane: ' + (bridgePlaneReady ? 'ok' : 'no')) : ''))
-      : 'Bridge connected — Kinect not found',
-      kinectOk ? 'ok' : 'warn');
+    bridgeTvReady = !!m.tv_ready;
+    if (m.tv_status) bridgeTvStatus = m.tv_status;
+    applyKinectStatus(!!m.kinect_ok, true);
   } else if (op === 'hand') {
     onHandFrame(m);
-  } else if (op === 'cal_started') {
-    calibrationMode = true;
-    showCalibrationOverlay();
-    calCancelBtn.disabled = false;
-    calBtn.disabled = true;
-  } else if (op === 'cal_cancelled' || op === 'cal_reset') {
-    calibrationMode = false;
-    hideCalibrationOverlay();
-    calCancelBtn.disabled = true;
-    calBtn.disabled = false;
-  } else if (op === 'plane_capture_started') {
-    setBridgeStatus('Capturing TV plane… keep hands out of the depth view', 'warn');
-  } else if (op === 'plane_ready') {
-    bridgePlaneReady = true;
-    var mh = document.getElementById('kinectModeHelp');
-    if (mh && bridgeKinectMode === 'depth') {
-      mh.textContent = 'Tracking: depth blobs | TV plane: ready';
+  } else if (op === 'tv_calib_started') {
+    if (m.status) bridgeTvStatus = m.status;
+    showTvCalOverlay();
+    applyTvCalStatusUI();
+  } else if (op === 'tv_calib_progress') {
+    if (m.status) bridgeTvStatus = m.status;
+    applyTvCalStatusUI();
+    if (m.result && m.result.reason && m.result.ok === false && !m.result.done) {
+      setBridgeStatus('Calibration: ' + m.result.reason, 'warn');
     }
-    setBridgeStatus('TV plane fitted — depth segmentation enabled', 'ok');
-  } else if (op === 'plane_capture_failed') {
-    setBridgeStatus('TV plane capture failed: ' + (m.reason || 'unknown'), 'err');
+  } else if (op === 'tv_calib_done') {
+    bridgeTvReady = !!m.ready;
+    if (m.status) bridgeTvStatus = m.status;
+    hideTvCalOverlay();
+    applyTvCalStatusUI();
+    if (m.ready) {
+      setBridgeStatus('TV calibrated — interaction box live', 'ok');
+    } else {
+      setBridgeStatus('TV calibration failed: ' + (m.reason || 'unknown'), 'err');
+    }
+  } else if (op === 'tv_calib_cancelled') {
+    if (m.status) bridgeTvStatus = m.status;
+    hideTvCalOverlay();
+    applyTvCalStatusUI();
+  } else if (op === 'tv_calib_reset') {
+    bridgeTvReady = false;
+    if (m.status) bridgeTvStatus = m.status;
+    hideTvCalOverlay();
+    applyTvCalStatusUI();
+    setBridgeStatus('TV calibration cleared', 'warn');
   }
 }
 
@@ -1088,10 +1063,16 @@ function endPinch() {
 }
 
 function onHandFrame(m) {
+  if (m.tv_status) bridgeTvStatus = m.tv_status;
+  if (typeof m.tv_ready === 'boolean') bridgeTvReady = m.tv_ready;
+
+  // Refresh wizard UI live (esp. body-tracked indicator).
+  if (bridgeTvStatus.mode === 'capturing') applyTvCalStatusUI(m);
+
   renderOverlay(m);
   updateKinectDebug(m);
-  if (calibrationMode) {
-    updateCalibrationUI(m);
+
+  if (bridgeTvStatus.mode === 'capturing') {
     if (pinchActive) endPinch();
     return;
   }
@@ -1129,7 +1110,7 @@ function renderOverlay(m) {
   resizeOverlayCanvas();
   overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
   if (!m || typeof m.cx !== 'number' || typeof m.cy !== 'number') return;
-  if (!m.tracked || !m.cal_ready) return;
+  if (!m.tracked || !m.tv_ready) return;
   var r = Math.max(5, Math.round(brushSize * 1.8));
   overlayCtx.save();
   overlayCtx.lineWidth = 1.5;
@@ -1150,145 +1131,125 @@ function renderOverlay(m) {
 }
 
 function updateKinectDebug(m) {
-  if (!kDebugEnabled) return;
-  if (!kinectDebugStats) return;
-  var distCm = (typeof m.pinch_dist_m === 'number' && m.pinch_dist_m >= 0)
-    ? (m.pinch_dist_m * 100).toFixed(1) + 'cm'
+  if (!kDebugEnabled || !kinectDebugStats) return;
+  var distCm = (typeof m.tip_signed_dist_m === 'number' && m.tip_signed_dist_m >= 0)
+    ? (m.tip_signed_dist_m * 100).toFixed(1) + 'cm'
     : '-';
+  var tvLabel = m.tv_ready ? 'ready' : (bridgeTvStatus.mode === 'capturing'
+    ? ('cal ' + (bridgeTvStatus.captured || 0) + '/' + (bridgeTvStatus.total || 4))
+    : 'not calibrated');
   kinectDebugStats.textContent =
     'tracked: ' + (m.tracked ? 'yes' : 'no') +
-    ' | confident: ' + (m.confident ? 'yes' : 'no') +
-    ' | pinch(raw/stable): ' + (m.pinch_raw ? '1' : '0') + '/' + (m.pinch ? '1' : '0') +
-    ' | dist: ' + distCm;
-
-  if (!kinectDebugCtx) return;
-  kinectDebugCtx.clearRect(0, 0, kinectDebugCanvas.width, kinectDebugCanvas.height);
-  if (!m.debug_joints) return;
-  var hj = m.debug_joints.hand_color || [-1, -1];
-  var tj = m.debug_joints.thumb_color || [-1, -1];
-  var wj = m.debug_joints.wrist_color || [-1, -1];
-  var sx = kinectDebugCanvas.width / 1920;
-  var sy = kinectDebugCanvas.height / 1080;
-  function p(pt) { return [pt[0] * sx, pt[1] * sy]; }
-  function valid(pt) { return pt[0] >= 0 && pt[1] >= 0; }
-  var hp = p(hj), tp = p(tj), wp = p(wj);
-
-  kinectDebugCtx.lineWidth = 2;
-  if (valid(hj) && valid(wj)) {
-    kinectDebugCtx.strokeStyle = 'rgba(112, 210, 255, 0.95)';
-    kinectDebugCtx.beginPath();
-    kinectDebugCtx.moveTo(wp[0], wp[1]);
-    kinectDebugCtx.lineTo(hp[0], hp[1]);
-    kinectDebugCtx.stroke();
-  }
-  if (valid(hj) && valid(tj)) {
-    kinectDebugCtx.strokeStyle = 'rgba(255, 180, 70, 0.95)';
-    kinectDebugCtx.beginPath();
-    kinectDebugCtx.moveTo(hp[0], hp[1]);
-    kinectDebugCtx.lineTo(tp[0], tp[1]);
-    kinectDebugCtx.stroke();
-  }
-  function dot(pt, color, r) {
-    kinectDebugCtx.fillStyle = color;
-    kinectDebugCtx.beginPath();
-    kinectDebugCtx.arc(pt[0], pt[1], r, 0, Math.PI * 2);
-    kinectDebugCtx.fill();
-  }
-  if (valid(wj)) dot(wp, 'rgba(112, 210, 255, 0.95)', 3.2);
-  if (valid(hj)) dot(hp, m.pinch ? 'rgba(255, 60, 60, 0.95)' : 'rgba(255,255,255,0.95)', 4.0);
-  if (valid(tj)) dot(tp, 'rgba(255, 180, 70, 0.95)', 3.0);
+    ' | tv: ' + tvLabel +
+    ' | tip→plane: ' + distCm +
+    ' | body: ' + (m.body_tracked ? 'yes' : 'no');
 }
 
-// --- Calibration wizard UI ---
-// Markers sit exactly on the 4 canvas corners (centered, so half of each
-// marker extends outside the canvas). The server also uses corner (0,0)…(W,H)
-// as homography destinations, so "hand where the marker is shown" ↔ "that
-// canvas corner" is a one-to-one mapping.
-var CAL_CORNER_PCT = [
-  [0.0, 0.0],   // TL
-  [1.0, 0.0],   // TR
-  [1.0, 1.0],   // BR
-  [0.0, 1.0],   // BL
-];
-var CAL_LABELS = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
+// --- TV calibration wizard UI ---
+var TV_CAL_LABELS = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
 
-function showCalibrationOverlay() {
+function showTvCalOverlay() {
   if (!calOverlayEl) return;
   calOverlayEl.innerHTML = '';
+  var corners = [[0,0], [1,0], [1,1], [0,1]];
   for (var i = 0; i < 4; i++) {
     var t = document.createElement('div');
     t.className = 'cal-target';
     t.setAttribute('data-idx', String(i));
-    t.style.left = (CAL_CORNER_PCT[i][0] * 100) + '%';
-    t.style.top  = (CAL_CORNER_PCT[i][1] * 100) + '%';
+    t.style.left = (corners[i][0] * 100) + '%';
+    t.style.top  = (corners[i][1] * 100) + '%';
     calOverlayEl.appendChild(t);
   }
   var msg = document.createElement('div');
   msg.className = 'cal-instruct';
   msg.id = 'calInstruct';
-  msg.innerHTML = 'Move your right hand above the highlighted corner, '
-                + '<b>pinch &amp; hold</b> for ½ second, then release.';
   calOverlayEl.appendChild(msg);
   calOverlayEl.classList.remove('hidden');
 }
 
-function hideCalibrationOverlay() {
+function hideTvCalOverlay() {
   if (!calOverlayEl) return;
   calOverlayEl.classList.add('hidden');
   calOverlayEl.innerHTML = '';
-  calCancelBtn.disabled = true;
-  calBtn.disabled = false;
 }
 
-function updateCalibrationUI(m) {
-  var cs = m.cal_status || {};
-  var activeIdx = (typeof cs.corner === 'number') ? cs.corner : 0;
-  var targets = calOverlayEl.querySelectorAll('.cal-target');
-  for (var i = 0; i < targets.length; i++) {
-    targets[i].classList.remove('active', 'done');
-    if (i < activeIdx) targets[i].classList.add('done');
-    else if (i === activeIdx) targets[i].classList.add('active');
+function applyTvCalStatusUI(handFrame) {
+  var capturing = bridgeTvStatus.mode === 'capturing';
+  if (tvCalPanel) tvCalPanel.classList.toggle('hidden', !capturing);
+  if (tvCalStartBtn) tvCalStartBtn.disabled = capturing;
+
+  var captured = bridgeTvStatus.captured || 0;
+  var total = bridgeTvStatus.total || 4;
+  var idx = bridgeTvStatus.current_corner || 0;
+  if (idx >= total) idx = total - 1;
+  var label = TV_CAL_LABELS[idx] || '?';
+
+  if (tvCalRedoBtn) tvCalRedoBtn.disabled = !capturing || captured === 0;
+  if (tvCalStepText) {
+    if (capturing) {
+      tvCalStepText.innerHTML =
+        'Step ' + (idx + 1) + ' / ' + total + ': <b>' + label + '</b>'
+        + ' (captured ' + captured + '/' + total + ')';
+    } else {
+      tvCalStepText.textContent = '';
+    }
   }
-  var msg = document.getElementById('calInstruct');
-  if (!msg) return;
-  var label = CAL_LABELS[activeIdx] || '?';
-  switch (cs.state) {
-    case 'sampling':
-      msg.innerHTML = 'Hold… ' + (cs.samples || 0) + ' / ' + (cs.need || 8) + ' samples';
-      break;
-    case 'waiting':
-      msg.innerHTML = 'Target: <b>' + label + '</b>. Pinch and hold over this corner.';
-      break;
-    case 'corner_done':
-      msg.innerHTML = 'Nice. Now target: <b>' + label + '</b>.';
-      break;
-    case 'retry':
-      msg.innerHTML = 'Too shaky — please try again. Target: <b>' + label + '</b>.';
-      break;
-    case 'done':
-      msg.innerHTML = 'Calibration saved!';
-      setTimeout(hideCalibrationOverlay, 800);
-      break;
-    case 'failed':
-      msg.innerHTML = 'Calibration failed: ' + (cs.reason || 'unknown');
-      setTimeout(hideCalibrationOverlay, 2500);
-      break;
-    default:
-      msg.innerHTML = 'Target: <b>' + label + '</b>. Pinch &amp; hold to sample.';
+  // Body tracking indicator
+  if (tvCalBodyHint) {
+    var bodyOk = !!(handFrame && handFrame.body_tracked);
+    tvCalBodyHint.className = bodyOk ? 'tv-cal-bodyok' : 'tv-cal-bodybad';
+    tvCalBodyHint.textContent = bodyOk
+      ? 'SDK body OK — Confirm will lock in HandTipRight as this corner'
+      : 'SDK body not visible — stand in front of Kinect';
+  }
+  // Top status text
+  if (tvCalStatusTextEl) {
+    if (bridgeTvReady) {
+      tvCalStatusTextEl.textContent = 'TV: calibrated';
+      tvCalStatusTextEl.style.color = '#7c7';
+    } else if (capturing) {
+      tvCalStatusTextEl.textContent =
+        'TV: calibrating (' + captured + '/' + total + ')';
+      tvCalStatusTextEl.style.color = '#dd6';
+    } else {
+      tvCalStatusTextEl.textContent = 'TV: not calibrated';
+      tvCalStatusTextEl.style.color = '#aaa';
+    }
+  }
+  // Corner overlay highlights
+  if (calOverlayEl && !calOverlayEl.classList.contains('hidden')) {
+    var targets = calOverlayEl.querySelectorAll('.cal-target');
+    for (var i = 0; i < targets.length; i++) {
+      targets[i].classList.remove('active', 'done');
+      if (i < captured) targets[i].classList.add('done');
+      else if (i === captured) targets[i].classList.add('active');
+    }
+    var msg = document.getElementById('calInstruct');
+    if (msg) {
+      msg.innerHTML = capturing
+        ? ('Aim right hand at <b>' + label + '</b> corner, then click <b>Confirm</b> in the sidebar.')
+        : '';
+    }
   }
 }
 
 // --- Wire up buttons ---
-if (calBtn) calBtn.onclick = function() { sendBridge({ op: 'start_calibration' }); };
-if (calCancelBtn) calCancelBtn.onclick = function() { sendBridge({ op: 'cancel_calibration' }); };
-if (calResetBtn) calResetBtn.onclick = function() {
-  if (confirm('Clear stored Kinect calibration?')) sendBridge({ op: 'reset_calibration' });
+if (tvCalStartBtn) tvCalStartBtn.onclick = function() {
+  sendBridge({ op: 'tv_calib_start' });
+};
+if (tvCalConfirmBtn) tvCalConfirmBtn.onclick = function() {
+  sendBridge({ op: 'tv_calib_confirm' });
+};
+if (tvCalRedoBtn) tvCalRedoBtn.onclick = function() {
+  sendBridge({ op: 'tv_calib_redo' });
+};
+if (tvCalCancelBtn) tvCalCancelBtn.onclick = function() {
+  sendBridge({ op: 'tv_calib_cancel' });
+};
+if (tvCalResetBtn) tvCalResetBtn.onclick = function() {
+  if (confirm('Clear stored TV calibration?')) sendBridge({ op: 'tv_calib_reset' });
 };
 if (kDebugToggleBtn) kDebugToggleBtn.onclick = function() { setKDebugEnabled(!kDebugEnabled); };
-var planeFitBtn = document.getElementById('planeFitBtn');
-if (planeFitBtn) planeFitBtn.onclick = function() {
-  sendBridge({ op: 'capture_tv_plane' });
-};
 
 // Initial overlay sizing + kick off bridge connection.
 resizeOverlayCanvas();
