@@ -212,6 +212,35 @@ class TVCalibration:
         except Exception:  # noqa: BLE001
             pass
 
+    def commit_auto(self, corners_tl_tr_br_bl) -> TVCalibrationResult:
+        """Commit a 4-corner calibration sourced from auto depth-plane fit.
+
+        ``corners_tl_tr_br_bl`` must be a sequence of 4 (x, y, z) points
+        already ordered as TL, TR, BR, BL in camera space. We re-fit the
+        plane with SVD on those 4 points (so the plane stays consistent
+        with the corners), then run the same finalisation as the manual
+        wizard (basis, polygon (u,v), homography → canvas).
+        """
+        seq = list(corners_tl_tr_br_bl)
+        if len(seq) != 4:
+            return TVCalibrationResult(False, "auto-commit needs exactly 4 corners")
+        try:
+            self.captured = [
+                (float(c[0]), float(c[1]), float(c[2])) for c in seq
+            ]
+        except Exception as e:  # noqa: BLE001
+            return TVCalibrationResult(False, f"auto-commit bad corner format: {e}")
+        # Reset wizard state — auto-commit is one-shot.
+        self.mode = "idle"
+        self.current_corner = 0
+        res = self._finalize()
+        if not res.ok:
+            self.captured = []
+        else:
+            # _finalize already cleared self.captured? No, only the wizard does.
+            self.captured = []
+        return res
+
     # -------- finalization (4 corners → plane + basis + homography) --------
     def _finalize(self) -> TVCalibrationResult:
         if len(self.captured) != 4:

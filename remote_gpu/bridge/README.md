@@ -5,10 +5,12 @@ NCA browser client. The runtime is **depth-first**:
 
 * The TV lies flat (or at any orientation) and the Kinect is mounted at TV
   height, slightly tilted toward the screen.
-* You manually point your **right hand (HandTipRight)** at each of the four
-  TV corners and press **Confirm** for each — that single capture defines
-  both the TV's 3D plane *and* the homography that maps real-world
-  fingertip positions onto the canvas. No hidden RANSAC, no auto-fit.
+* TV calibration is **one-click automatic**: capture ~1.5 s of depth
+  frames, RANSAC-fit the dominant 3D plane, isolate the largest
+  co-planar blob (= the TV screen), wrap a min-area rectangle around
+  it to get 4 corners, and assign them to canvas TL/TR/BR/BL by their
+  (X, Z) in camera space (front=top, right=right). The result is saved
+  to `tv_calibration.json`.
 * At runtime, the bridge ignores the SDK skeleton: the depth frame is
   filtered by *(inside the calibrated TV polygon) ∧ (signed distance to
   plane within `[0.02, 0.45]`m)*, and the **fingertip = pixel closest to
@@ -73,25 +75,35 @@ Expected boot log:
 If you see `PyKinect2 import failed` the bridge keeps running but emits no
 hand frames — install PyKinect2 and the Kinect SDK.
 
-## TV Calibration (one-time)
+## TV Calibration (one-time, auto)
 
 Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
 
-1. Click **Start TV Calibration**. The wizard panel appears.
-2. Stand in front of the Kinect so it sees your right arm — the wizard
-   shows `SDK body OK` in green when `HandTipRight` is being tracked.
-3. For each corner (order: **TL → TR → BR → BL**):
-   * point your **right hand fingertip** at that physical corner of the TV,
-   * hold steady,
-   * click **Confirm Corner**.
-   The wizard advances to the next corner automatically.
-4. After the 4th confirm, the bridge fits a plane through the 4 captured
-   points (SVD), builds an in-plane (u, v) basis, and solves a homography
-   from the corner (u, v) to the canvas corners. The result is saved to
-   `tv_calibration.json` next to this README.
+1. Make sure the **TV screen is fully visible** to the Kinect, and
+   **clear hands / people** out of the depth view (so the largest
+   co-planar blob really is the TV).
+2. Click **Auto-Calibrate TV (Depth)**.
+3. The bridge captures ~1.5 s of depth, then:
+   * RANSAC-fits the dominant 3D plane,
+   * keeps depth pixels within `BRIDGE_AUTOFIT_EPS_M` of that plane,
+   * morph-opens that mask (`BRIDGE_AUTOFIT_OPEN_PX`) to break thin
+     bridges to neighbouring co-planar wood strips,
+   * picks the **largest connected component** as the TV blob,
+   * wraps a `cv2.minAreaRect` around the blob's in-plane (u, v)
+     points, reconstructing 4 corners in 3D,
+   * sorts those corners into TL/TR/BR/BL by their (X, Z): front
+     (smaller Z) = top, right (larger X) = right,
+   * SVD-refits the plane on the 4 sorted corners and solves the
+     homography to the canvas. Result saved to `tv_calibration.json`.
 
-While capturing, **Redo** discards the last corner. **Cancel** aborts
-without saving. **Reset TV Calibration** deletes the saved file.
+If the wood strips around the TV are co-planar *and* contiguous, they
+will end up inside the blob and the rectangle will be slightly larger
+than the screen. Either physically separate them, increase the
+morph-open size (`BRIDGE_AUTOFIT_OPEN_PX`), or reduce the on-plane
+tolerance (`BRIDGE_AUTOFIT_EPS_M`).
+
+**Reset TV Calibration** deletes the saved file. Re-run Auto-Calibrate
+any time the camera moves.
 
 ### Verifying the fit
 
@@ -100,10 +112,10 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | color | meaning |
 |-------|---------|
 | TURBO pseudo-color | raw depth |
-| **magenta polygon outline** | the 4 captured corners projected to the depth image |
-| **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon — should align with the physical TV |
+| **magenta polygon outline** | the 4 auto-derived corners projected to the depth image — should hug the actual TV |
+| **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon |
 | **light green** | the interaction box: pixels in the plane-normal slab `[BRIDGE_DEPTH_BAND_MIN_M, BRIDGE_DEPTH_BAND_MAX_M]` *and* inside the polygon |
-| **yellow circle** | live SDK `HandTipRight` (handy during calibration) |
+| **yellow circle** | live SDK `HandTipRight` (visual reference only — no longer used for calibration) |
 | **white cross + ring** | the depth-derived fingertip used at runtime (closest-to-plane median of the K nearest pixels) |
 
 ## Tuning (env vars)
@@ -117,6 +129,12 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_DEPTH_BAND_MIN_M` | `0.02` | near edge of the interaction box (m above plane) |
 | `BRIDGE_DEPTH_BAND_MAX_M` | `0.45` | far edge of the interaction box (m above plane) |
 | `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
+
+Auto-calibration parameters are currently set in code defaults
+(`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,
+on-plane epsilon `1.5 cm`, morph-open kernel `3×3`, min blob `1500 px`,
+plane fit point limit `12 000`. Adjust by editing
+`bridge/depth_processing.py` if your scene needs it.
 
 ## Protocol (for reference)
 
@@ -141,8 +159,18 @@ Every broadcast frame:
 }
 ```
 
-Calibration wizard ops (browser → bridge): `tv_calib_start`,
-`tv_calib_confirm`, `tv_calib_redo`, `tv_calib_cancel`,
-`tv_calib_reset`. Bridge → browser broadcasts: `tv_calib_started`,
-`tv_calib_progress`, `tv_calib_done`, `tv_calib_cancelled`,
-`tv_calib_reset`.
+Calibration ops (browser → bridge):
+
+| op | effect |
+|---|---|
+| `tv_autocalib_capture` | start one-shot depth-plane fit + 4-corner derivation |
+| `tv_calib_reset`       | delete saved `tv_calibration.json` |
+
+Bridge → browser broadcasts:
+
+| op | payload |
+|---|---|
+| `tv_autocalib_started` | (no fields) — capture begun |
+| `tv_autocalib_done`    | `ready, n_blob_px, area_m2, edge_a_m, edge_b_m, corners_3d, tv_status` |
+| `tv_autocalib_failed`  | `reason` (e.g. `RANSAC failed`, `largest blob too small`, `finalize: ...`) |
+| `tv_calib_reset`       | calibration cleared |

@@ -5,10 +5,7 @@ Run on the Windows laptop that has the Kinect:
     python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
 
 Browser → Bridge (JSON text):
-    {"op": "tv_calib_start"}              # enter 4-corner wizard
-    {"op": "tv_calib_confirm"}            # commit current corner = latest HandTipRight
-    {"op": "tv_calib_redo"}               # discard last captured corner
-    {"op": "tv_calib_cancel"}             # exit wizard without saving
+    {"op": "tv_autocalib_capture"}        # one-shot depth-plane fit + 4 auto corners
     {"op": "tv_calib_reset"}              # delete saved tv_calibration.json
 
 Bridge → Browser (JSON text, broadcast):
@@ -19,9 +16,12 @@ Bridge → Browser (JSON text, broadcast):
      "body_tip_xyz": [x,y,z]?, "body_tracked": bool,
      "cx": float?, "cy": float?,           # only when tv_ready AND tracked
      "pinch": bool}                        # true while a fingertip is in the box
-    {"op": "tv_calib_started"} {"op": "tv_calib_progress", ...}
-    {"op": "tv_calib_done", "ready": bool, "reason": str}
-    {"op": "tv_calib_cancelled"} {"op": "tv_calib_reset"}
+    {"op": "tv_autocalib_started"}
+    {"op": "tv_autocalib_done", "ready": bool, "n_blob_px": int,
+     "area_m2": float, "edge_a_m": float, "edge_b_m": float,
+     "corners_3d": [[x,y,z], ...], "tv_status": {...}}
+    {"op": "tv_autocalib_failed", "reason": str}
+    {"op": "tv_calib_reset"}
 """
 from __future__ import annotations
 
@@ -132,6 +132,36 @@ async def processor_loop() -> None:
         await _new_raw_event.wait()
         _new_raw_event.clear()
 
+        # Always drain bridge-side messages first so wizard/auto-calibration
+        # acks are not delayed by the broadcast rate-limit below.
+        drain = getattr(kinect, "drain_pending_msgs", None)
+        if callable(drain):
+            for extra in drain():
+                op_extra = extra.get("op")
+                if op_extra == "tv_autocalib_corners_ready":
+                    corners = extra.get("corners_3d") or []
+                    fin = tv_calibration.commit_auto(corners)
+                    if fin.ok:
+                        await _broadcast({
+                            "op": "tv_autocalib_done",
+                            "ready": True,
+                            "tv_status": tv_calibration.status_dict(),
+                            "n_blob_px": extra.get("n_blob_px", 0),
+                            "area_m2": extra.get("area_m2", 0.0),
+                            "edge_a_m": extra.get("edge_a_m", 0.0),
+                            "edge_b_m": extra.get("edge_b_m", 0.0),
+                            "ransac_inlier_pts": extra.get("ransac_inlier_pts", 0),
+                            "corners_3d": corners,
+                        })
+                    else:
+                        await _broadcast({
+                            "op": "tv_autocalib_failed",
+                            "reason": "finalize: " + (fin.reason or "unknown"),
+                            "corners_3d": corners,
+                        })
+                else:
+                    await _broadcast(extra)
+
         with _raw_lock:
             raw = _latest_raw
         if raw is None:
@@ -179,11 +209,6 @@ async def processor_loop() -> None:
 
         await _broadcast(payload)
 
-        drain = getattr(kinect, "drain_pending_msgs", None)
-        if callable(drain):
-            for extra in drain():
-                await _broadcast(extra)
-
 
 # ------------------ Lifecycle ------------------
 @app.on_event("startup")
@@ -207,17 +232,6 @@ async def on_shutdown() -> None:
 
 
 # ------------------ WebSocket endpoint ------------------
-async def _broadcast_status(extra: Optional[dict] = None) -> None:
-    msg = {
-        "op": "tv_calib_progress",
-        "status": tv_calibration.status_dict(),
-        "tv_ready": tv_calibration.ready,
-    }
-    if extra:
-        msg.update(extra)
-    await _broadcast(msg)
-
-
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
@@ -242,40 +256,26 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 continue
             op = msg.get("op")
 
-            if op == "tv_calib_start":
-                tv_calibration.start()
-                await _broadcast({
-                    "op": "tv_calib_started",
-                    "status": tv_calibration.status_dict(),
-                })
-
-            elif op == "tv_calib_confirm":
-                getter = getattr(kinect, "get_latest_body_tip", None)
-                tip = getter() if callable(getter) else None
-                res = tv_calibration.confirm(tip)
-                await _broadcast_status({
-                    "op": "tv_calib_progress",
-                    "result": res,
-                    "captured": len(tv_calibration.captured),
-                })
-                if res.get("done"):
-                    await _broadcast({
-                        "op": "tv_calib_done",
-                        "ready": tv_calibration.ready,
-                        "reason": res.get("reason", ""),
-                        "status": tv_calibration.status_dict(),
-                    })
-
-            elif op == "tv_calib_redo":
-                res = tv_calibration.redo()
-                await _broadcast_status({"op": "tv_calib_progress", "result": res})
-
-            elif op == "tv_calib_cancel":
-                tv_calibration.cancel()
-                await _broadcast({
-                    "op": "tv_calib_cancelled",
-                    "status": tv_calibration.status_dict(),
-                })
+            if op == "tv_autocalib_capture":
+                req = getattr(kinect, "request_auto_calibration", None)
+                if not callable(req):
+                    await ws.send_text(json.dumps({
+                        "op": "tv_autocalib_failed",
+                        "reason": "auto-calibration not available in this Kinect mode",
+                    }))
+                else:
+                    accepted = bool(req())
+                    if accepted:
+                        # Immediate ACK — the kinect thread is about to block
+                        # for ~1.5s capturing depth frames, during which no
+                        # new RawHandFrames will be emitted and the processor
+                        # loop won't wake up to drain queued messages.
+                        await _broadcast({"op": "tv_autocalib_started"})
+                    else:
+                        await ws.send_text(json.dumps({
+                            "op": "tv_autocalib_failed",
+                            "reason": "another auto-calibration is already running",
+                        }))
 
             elif op == "tv_calib_reset":
                 tv_calibration.reset()

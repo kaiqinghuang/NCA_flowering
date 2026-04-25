@@ -14,13 +14,20 @@ Pipeline (per Kinect v2 depth frame, 512×424, millimeters):
        the box. We use the median of the K closest pixels (default 20) so
        the result is robust to lone-pixel depth noise.
 
+This module also exposes ``auto_calibrate_tv_from_depth`` — a one-shot
+routine that fits the TV plane via RANSAC on a stack of depth frames,
+isolates the largest co-planar blob (= the TV screen), and derives the
+4 rectangle corners (rotated bounding box) sorted into TL/TR/BR/BL by
+their (X, Z) position in camera space.
+
 There is **no pinch heuristic** here: while a fingertip exists in the box,
 the bridge emits ``pinch=True`` so the canvas paints continuously.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from itertools import permutations
+from typing import Iterable, Optional, Tuple
 
 import numpy as np
 
@@ -347,3 +354,274 @@ def render_depth_debug_bgr(
     )
 
     return cv2.resize(bgr, (DEPTH_W * 2, DEPTH_H * 2), interpolation=cv2.INTER_NEAREST)
+
+
+# ----------------------------------------------------------------------
+# Auto-calibration: depth point cloud → TV plane + 4 rectangle corners
+# ----------------------------------------------------------------------
+def _fit_plane_svd_xyz(points: np.ndarray) -> Optional[Tuple[float, float, float, float]]:
+    """Least-squares plane through points (N, 3). Returns (a, b, c, d) or None."""
+    p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if p.shape[0] < 3:
+        return None
+    cent = p.mean(axis=0)
+    q = p - cent
+    _, _, vt = np.linalg.svd(q, full_matrices=False)
+    n = vt[-1]
+    nn = float(np.linalg.norm(n))
+    if nn < 1e-12:
+        return None
+    n /= nn
+    a, b, c = float(n[0]), float(n[1]), float(n[2])
+    d = float(-(a * cent[0] + b * cent[1] + c * cent[2]))
+    return a, b, c, d
+
+
+def _ransac_plane(
+    pts: np.ndarray,
+    iterations: int = 200,
+    thresh: float = 0.02,
+    min_inliers: int = 600,
+    rng: Optional[np.random.Generator] = None,
+) -> Optional[Tuple[float, float, float, float]]:
+    """RANSAC + SVD refit for a 3D plane on (N, 3) points."""
+    if rng is None:
+        rng = np.random.default_rng(42)
+    n_pts = int(pts.shape[0])
+    if n_pts < max(min_inliers // 2, 30):
+        return None
+    best_count = 0
+    best_inliers: Optional[np.ndarray] = None
+    for _ in range(iterations):
+        idx = rng.choice(n_pts, size=3, replace=False)
+        p0, p1, p2 = pts[idx[0]], pts[idx[1]], pts[idx[2]]
+        v1 = p1 - p0
+        v2 = p2 - p0
+        n = np.cross(v1, v2)
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-9:
+            continue
+        n /= nn
+        d = float(-np.dot(n, p0))
+        s = pts @ n + d
+        inliers = np.abs(s) < thresh
+        cnt = int(inliers.sum())
+        if cnt > best_count:
+            best_count = cnt
+            best_inliers = inliers
+    if best_inliers is None or best_count < min_inliers:
+        return None
+    refit = _fit_plane_svd_xyz(pts[best_inliers])
+    return refit
+
+
+def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
+    """Permute 4 (x, y, z) corners to canvas-order [TL, TR, BR, BL].
+
+    Convention (matches user's setup, after Y-down convention is enforced):
+        - canvas TopLeft  ↔ smaller Z (front, closer to Kinect) AND smaller X (left)
+        - canvas TopRight ↔ smaller Z (front)                    AND larger  X (right)
+        - canvas BottomRight ↔ larger Z (back)                   AND larger  X
+        - canvas BottomLeft  ↔ larger Z (back)                   AND smaller X
+
+    Robust to arbitrary in-plane rotation: we score by angle around the
+    centroid in the (X, Z) plane. ``atan2(dx, -dz)`` puts +"front" at angle 0
+    growing CCW toward right. For each canvas corner we pick the in-plane
+    angle that best matches; brute-forcing all 24 permutations guarantees a
+    unique assignment.
+    """
+    pts = np.asarray(corners_3d, dtype=np.float64).reshape(4, 3)
+    cx = float(pts[:, 0].mean())
+    cz = float(pts[:, 2].mean())
+    angles = np.arctan2(pts[:, 0] - cx, -(pts[:, 2] - cz))  # 0=front, +π/2=right
+    target = np.array([
+        -np.pi / 4.0,   # TL: front-left  (dx<0, dz<0)
+        +np.pi / 4.0,   # TR: front-right (dx>0, dz<0)
+        +3 * np.pi / 4.0,  # BR: back-right (dx>0, dz>0)
+        -3 * np.pi / 4.0,  # BL: back-left  (dx<0, dz>0)
+    ])
+    best_perm = None
+    best_cost = np.inf
+    for perm in permutations(range(4)):
+        cost = 0.0
+        for tgt_i, c_i in enumerate(perm):
+            d = angles[c_i] - target[tgt_i]
+            d = float(np.arctan2(np.sin(d), np.cos(d)))  # wrap to [-π, π]
+            cost += abs(d)
+        if cost < best_cost:
+            best_cost = cost
+            best_perm = perm
+    if best_perm is None:
+        return [tuple(map(float, p)) for p in pts]
+    return [tuple(map(float, pts[best_perm[i]])) for i in range(4)]
+
+
+def auto_calibrate_tv_from_depth(
+    depth_frames: Iterable[np.ndarray],
+    on_plane_eps_m: float = 0.015,
+    ransac_iters: int = 240,
+    ransac_inlier_thresh_m: float = 0.02,
+    ransac_min_inliers: int = 800,
+    min_blob_px: int = 1500,
+    max_ransac_pts: int = 12000,
+    z_min_m: float = 0.4,
+    z_max_m: float = 4.5,
+    morph_open_px: int = 3,
+) -> dict:
+    """One-shot TV plane + 4-corner derivation from a depth-frame stack.
+
+    Steps:
+        1. Stack ``depth_frames`` into one (sub-sampled) point cloud.
+        2. RANSAC fit the dominant plane (refit via SVD on inliers).
+        3. Compute on-plane mask on the LAST frame; morph-open to break
+           thin connections to neighbouring co-planar wood strips.
+        4. Largest connected component = TV blob.
+        5. Build a temporary basis on the plane, project blob pixels to
+           plane (u, v), fit a min-area rotated rectangle → 4 in-plane
+           corners → reconstruct 3D → sort into TL/TR/BR/BL.
+
+    Returns a dict (always with ``ok``):
+        ok, reason
+        corners_3d        : list of 4 (x, y, z) tuples (TL, TR, BR, BL)
+        plane             : (a, b, c, d) with origin-side positive
+        n_blob_px         : int   pixel count of the chosen TV blob
+        area_m2           : float TV rectangle area in m²
+        ransac_inlier_pts : int   how many points fed to RANSAC
+    """
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return {"ok": False, "reason": "OpenCV (cv2) not installed"}
+
+    frames = list(depth_frames)
+    if not frames:
+        return {"ok": False, "reason": "no depth frames"}
+
+    z_min_mm = int(z_min_m * 1000.0)
+    z_max_mm = int(z_max_m * 1000.0)
+
+    # ---- 1. Build combined point cloud ----
+    v_idx, u_idx = np.indices((DEPTH_H, DEPTH_W))
+    u_f = u_idx.astype(np.float64)
+    v_f = v_idx.astype(np.float64)
+
+    cloud_chunks = []
+    for df in frames:
+        d = np.asarray(df, dtype=np.uint16).reshape(DEPTH_H, DEPTH_W)
+        m = (d > z_min_mm) & (d < z_max_mm)
+        if not m.any():
+            continue
+        z_m = d.astype(np.float64) * 0.001
+        x = (u_f - DEPTH_CX) * z_m / DEPTH_FX
+        y = (v_f - DEPTH_CY) * z_m / DEPTH_FY
+        cloud_chunks.append(np.stack([x[m], y[m], z_m[m]], axis=1))
+    if not cloud_chunks:
+        return {"ok": False, "reason": "no valid depth pixels in [%.2f, %.2f]m" % (z_min_m, z_max_m)}
+    pts = np.concatenate(cloud_chunks, axis=0)
+
+    rng = np.random.default_rng(42)
+    if pts.shape[0] > max_ransac_pts:
+        idx = rng.choice(pts.shape[0], max_ransac_pts, replace=False)
+        ransac_pts = pts[idx]
+    else:
+        ransac_pts = pts
+
+    # ---- 2. RANSAC plane ----
+    plane = _ransac_plane(
+        ransac_pts,
+        iterations=ransac_iters,
+        thresh=ransac_inlier_thresh_m,
+        min_inliers=ransac_min_inliers,
+        rng=rng,
+    )
+    if plane is None:
+        return {"ok": False, "reason": f"RANSAC failed (need ≥{ransac_min_inliers} inliers)"}
+    a, b, c, d = plane
+    # Orient normal so camera origin (0,0,0) lies on +n side.
+    if d < 0:
+        a, b, c, d = -a, -b, -c, -d
+
+    # ---- 3. On-plane mask on the LAST captured frame ----
+    df_last = np.asarray(frames[-1], dtype=np.uint16).reshape(DEPTH_H, DEPTH_W)
+    valid_last = (df_last > 0) & (df_last < 8192)
+    z_last = df_last.astype(np.float64) * 0.001
+    x_last = (u_f - DEPTH_CX) * z_last / DEPTH_FX
+    y_last = (v_f - DEPTH_CY) * z_last / DEPTH_FY
+    s_last = x_last * a + y_last * b + z_last * c + d
+    on_plane = valid_last & (np.abs(s_last) <= on_plane_eps_m)
+
+    n_on = int(np.count_nonzero(on_plane))
+    if n_on < min_blob_px:
+        return {"ok": False, "reason": f"only {n_on} on-plane pixels (need ≥{min_blob_px})"}
+
+    mask_u8 = on_plane.astype(np.uint8) * 255
+    if morph_open_px and morph_open_px > 0:
+        k = max(1, int(morph_open_px))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+        mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    # ---- 4. Largest connected blob ----
+    n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if n_lbl <= 1:
+        return {"ok": False, "reason": "no connected on-plane blobs"}
+    sizes = stats[1:, cv2.CC_STAT_AREA]
+    best_local = int(np.argmax(sizes))
+    best_lbl = best_local + 1
+    best_size = int(sizes[best_local])
+    if best_size < min_blob_px:
+        return {"ok": False, "reason": f"largest blob too small ({best_size}px < {min_blob_px})"}
+    blob_mask = labels == best_lbl
+
+    # ---- 5. Project blob to plane (u_tmp, v_tmp), min-area rect, sort corners ----
+    n_vec = np.array([a, b, c], dtype=np.float64)
+    arbitrary = np.array([1.0, 0.0, 0.0]) if abs(n_vec[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u_tmp = arbitrary - np.dot(arbitrary, n_vec) * n_vec
+    u_tmp_n = float(np.linalg.norm(u_tmp))
+    if u_tmp_n < 1e-9:
+        return {"ok": False, "reason": "degenerate provisional basis"}
+    u_tmp /= u_tmp_n
+    v_tmp = np.cross(n_vec, u_tmp)
+
+    bx = x_last[blob_mask]
+    by = y_last[blob_mask]
+    bz = z_last[blob_mask]
+    bs = bx * a + by * b + bz * c + d
+    px = bx - bs * a
+    py = by - bs * b
+    pz = bz - bs * c
+    origin_tmp = np.array([px.mean(), py.mean(), pz.mean()], dtype=np.float64)
+    rel_x = px - origin_tmp[0]
+    rel_y = py - origin_tmp[1]
+    rel_z = pz - origin_tmp[2]
+    u_coords = rel_x * u_tmp[0] + rel_y * u_tmp[1] + rel_z * u_tmp[2]
+    v_coords = rel_x * v_tmp[0] + rel_y * v_tmp[1] + rel_z * v_tmp[2]
+
+    pts2d = np.stack([u_coords, v_coords], axis=1).astype(np.float32)
+    if pts2d.shape[0] > 8000:
+        idx = rng.choice(pts2d.shape[0], 8000, replace=False)
+        pts2d = pts2d[idx]
+    rect = cv2.minAreaRect(pts2d.reshape(-1, 1, 2))
+    box2d = cv2.boxPoints(rect)  # (4, 2) in same units as pts2d (meters)
+
+    raw_corners = []
+    for u_c, v_c in box2d:
+        c3 = origin_tmp + float(u_c) * u_tmp + float(v_c) * v_tmp
+        raw_corners.append(c3)
+    raw_corners_arr = np.stack(raw_corners, axis=0)  # (4, 3)
+
+    edge_a = float(np.linalg.norm(raw_corners_arr[1] - raw_corners_arr[0]))
+    edge_b = float(np.linalg.norm(raw_corners_arr[2] - raw_corners_arr[1]))
+    area_m2 = edge_a * edge_b
+
+    sorted_corners = _assign_corners_TL_TR_BR_BL(raw_corners_arr)
+
+    return {
+        "ok": True,
+        "corners_3d": sorted_corners,
+        "plane": (float(a), float(b), float(c), float(d)),
+        "n_blob_px": best_size,
+        "area_m2": area_m2,
+        "ransac_inlier_pts": int(ransac_pts.shape[0]),
+        "edge_a_m": edge_a,
+        "edge_b_m": edge_b,
+    }

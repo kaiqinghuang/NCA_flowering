@@ -1,14 +1,19 @@
-"""Unified Kinect v2 runtime: Body (for TV calibration) + Depth (for runtime).
+"""Unified Kinect v2 runtime: Body (for SDK debug) + Depth (everything else).
 
 Opens **Body | Depth** so we can:
 
-* Stream `HandTipRight` 3D position from the SDK skeleton — used by the manual
-  4-corner TV calibration wizard (one click per corner).
-* Process the depth frame inside the calibrated TV interaction box to find a
-  fingertip (point with smallest signed distance to the TV plane) — used at
-  runtime to drive the canvas brush.
+* Stream `HandTipRight` 3D position from the SDK skeleton — surfaced as a
+  yellow marker in the depth-debug overlay (handy reference during
+  calibration, but no longer used for the TV plane fit).
+* Process the depth frame inside the calibrated TV interaction box to find
+  a fingertip (point with smallest signed distance to the TV plane) — used
+  at runtime to drive the canvas brush.
+* Run a one-shot **auto TV calibration** on demand: capture ~35 depth
+  frames, RANSAC-fit the dominant plane, isolate the largest co-planar
+  blob (= the TV screen), derive its 4 rectangle corners, sort them
+  TL/TR/BR/BL by (X, Z), and hand them off to the bridge for commit.
 
-The RGB color stream is **not** opened (saves USB bandwidth and CPU; the old
+The RGB color stream is **not** opened (saves USB bandwidth and CPU; the
 debug-color JPEG was removed in the depth-first redesign).
 """
 from __future__ import annotations
@@ -20,7 +25,11 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .depth_processing import analyze_depth_frame, render_depth_debug_bgr
+from .depth_processing import (
+    analyze_depth_frame,
+    auto_calibrate_tv_from_depth,
+    render_depth_debug_bgr,
+)
 from .kinect_source import HAND_STATE_NOT_TRACKED, HAND_STATE_OPEN, RawHandFrame
 
 
@@ -57,6 +66,10 @@ class KinectDepthSource:
         self._pending_lock = threading.Lock()
         self._pending_msgs: list[dict] = []
 
+        # Auto-calibration trigger flag (set from any thread, consumed by _run).
+        self._autocal_request = threading.Event()
+        self._autocal_in_progress = False
+
     # ---------- public API ----------
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="kinect-depth")
@@ -90,6 +103,17 @@ class KinectDepthSource:
     def _push_msg(self, msg: dict) -> None:
         with self._pending_lock:
             self._pending_msgs.append(msg)
+
+    def request_auto_calibration(self) -> bool:
+        """Schedule a one-shot TV plane auto-fit on the kinect thread.
+
+        Returns False if a previous request is still being processed (the
+        UI should debounce the button anyway).
+        """
+        if self._autocal_in_progress:
+            return False
+        self._autocal_request.set()
+        return True
 
     # ---------- runtime thread ----------
     def _apply_pykinect_compat_shims(self) -> None:
@@ -131,6 +155,11 @@ class KinectDepthSource:
         last_debug_push = 0.0
 
         while not self._stop.is_set():
+            # ----- One-shot auto-calibration request -----
+            if self._autocal_request.is_set():
+                self._autocal_request.clear()
+                self._do_auto_calibration(runtime)
+
             # ----- Body frame (cheap, run every loop iter when present) -----
             if runtime.has_new_body_frame():
                 try:
@@ -248,6 +277,78 @@ class KinectDepthSource:
                 hand_color=(-1.0, -1.0), thumb_color=(-1.0, -1.0), wrist_color=(-1.0, -1.0),
             ))
             time.sleep(0.1)
+
+    def _do_auto_calibration(self, runtime) -> None:
+        """Block the kinect thread briefly to capture a depth-frame stack and
+        fit the TV plane + 4 corners. Pushes ``tv_autocalib_*`` messages back
+        to the bridge via ``drain_pending_msgs``; the actual ``commit_auto``
+        on the shared TVCalibration runs on the asyncio thread (see main.py)
+        so we never race with the live frame loop.
+        """
+        self._autocal_in_progress = True
+        try:
+            # The "tv_autocalib_started" broadcast is sent synchronously from
+            # main.py's WS handler so the user gets immediate feedback. We
+            # do NOT push it from here because the processor loop only drains
+            # pending messages when a new RawHandFrame arrives, and we are
+            # about to block this thread for ~1.5s without emitting any.
+            buf: list[np.ndarray] = []
+            t_start = time.time()
+            t_deadline = t_start + 1.6
+            target_frames = 35
+            while (
+                not self._stop.is_set()
+                and time.time() < t_deadline
+                and len(buf) < target_frames
+            ):
+                if runtime.has_new_depth_frame():
+                    d = runtime.get_last_depth_frame()
+                    if d is not None:
+                        buf.append(np.asarray(d, dtype=np.uint16).copy())
+                else:
+                    time.sleep(0.005)
+            print(f"[kinect-depth] autocal: captured {len(buf)} depth frames in "
+                  f"{time.time() - t_start:.2f}s")
+            if len(buf) < 6:
+                self._push_msg({
+                    "op": "tv_autocalib_failed",
+                    "reason": f"only captured {len(buf)} depth frames",
+                })
+                return
+
+            try:
+                result = auto_calibrate_tv_from_depth(buf)
+            except Exception as e:  # noqa: BLE001
+                self._push_msg({
+                    "op": "tv_autocalib_failed",
+                    "reason": f"exception: {e}",
+                })
+                return
+
+            if not result.get("ok"):
+                self._push_msg({
+                    "op": "tv_autocalib_failed",
+                    "reason": result.get("reason", "unknown"),
+                })
+                return
+
+            print(
+                f"[kinect-depth] autocal: blob={result['n_blob_px']}px  "
+                f"area={result['area_m2']:.3f}m²  "
+                f"edges={result['edge_a_m']:.3f}×{result['edge_b_m']:.3f}m"
+            )
+            self._push_msg({
+                "op": "tv_autocalib_corners_ready",
+                "corners_3d": result["corners_3d"],
+                "plane": list(result["plane"]),
+                "n_blob_px": int(result["n_blob_px"]),
+                "area_m2": float(result["area_m2"]),
+                "edge_a_m": float(result["edge_a_m"]),
+                "edge_b_m": float(result["edge_b_m"]),
+                "ransac_inlier_pts": int(result.get("ransac_inlier_pts", 0)),
+            })
+        finally:
+            self._autocal_in_progress = False
 
     def _update_depth_debug_jpeg(
         self,

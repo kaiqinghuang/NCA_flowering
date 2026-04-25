@@ -164,29 +164,21 @@
       <div class="row"><span id="tvCalStatusText" class="kinect-status" style="color:#aaa;">TV: not calibrated</span></div>
 
       <div class="row" style="gap:6px; margin-top:4px;">
-        <button class="btn" id="tvCalStartBtn" style="flex:1;">Start TV Calibration</button>
+        <button class="btn" id="tvAutoCalBtn" style="flex:1;">Auto-Calibrate TV (Depth)</button>
       </div>
-
-      <div id="tvCalPanel" class="tv-cal-panel hidden">
-        <div class="tv-cal-step" id="tvCalStepText">Step 1 / 4: <b>top-left</b></div>
-        <div id="tvCalBodyHint" class="tv-cal-bodybad">SDK body not visible — stand in view</div>
-        <div class="row" style="gap:6px; margin-top:4px;">
-          <button class="btn" id="tvCalConfirmBtn" style="flex:2;">Confirm Corner</button>
-          <button class="btn" id="tvCalRedoBtn" style="flex:1;" disabled>Redo</button>
-        </div>
-        <div class="row" style="gap:6px; margin-top:4px;">
-          <button class="btn" id="tvCalCancelBtn" style="flex:1;">Cancel</button>
-        </div>
-      </div>
-
       <div class="row" style="gap:6px; margin-top:6px;">
         <button class="btn" id="tvCalResetBtn" style="flex:1;">Reset TV Calibration</button>
       </div>
 
+      <div id="tvAutoCalInfo" class="help" style="margin-top:6px; color:#888;"></div>
+
       <div class="help" style="margin-top:6px;">
-        Aim your <b>right hand</b> (HandTipRight) at each TV corner, hold steady, then click
-        <b>Confirm</b>. Order: <b>TL → TR → BR → BL</b>. After 4 corners are saved, the
-        depth-driven fingertip in the interaction box (above the TV) will draw onto the canvas.
+        Clear hands &amp; people from view, then click <b>Auto-Calibrate</b>.
+        The bridge captures ~1.5 s of depth, RANSAC-fits the dominant plane,
+        keeps the largest co-planar blob (= the TV screen), and assigns its 4
+        corners to canvas TL/TR/BR/BL by their (X, Z) in camera space (front =
+        top, right = right). Use the depth debug view below to verify the
+        magenta polygon hugs the actual TV.
         <span id="kinectModeHelp" style="display:block;margin-top:4px;color:#777;"></span>
       </div>
       <div class="row" style="gap:6px; margin-top:8px;">
@@ -794,15 +786,12 @@ var bridgeReady = false;
 var bridgeKinectMode = 'depth';
 var bridgeTvReady = false;
 var bridgeTvStatus = { mode: 'idle', current_corner: 0, captured: 0, total: 4 };
+var tvAutoCalRunning = false;
+var tvAutoCalLastInfo = '';
 var bridgeStatusEl = document.getElementById('kinectStatus');
 var tvCalStatusTextEl = document.getElementById('tvCalStatusText');
-var tvCalStartBtn = document.getElementById('tvCalStartBtn');
-var tvCalPanel = document.getElementById('tvCalPanel');
-var tvCalStepText = document.getElementById('tvCalStepText');
-var tvCalBodyHint = document.getElementById('tvCalBodyHint');
-var tvCalConfirmBtn = document.getElementById('tvCalConfirmBtn');
-var tvCalRedoBtn = document.getElementById('tvCalRedoBtn');
-var tvCalCancelBtn = document.getElementById('tvCalCancelBtn');
+var tvAutoCalBtn = document.getElementById('tvAutoCalBtn');
+var tvAutoCalInfoEl = document.getElementById('tvAutoCalInfo');
 var tvCalResetBtn = document.getElementById('tvCalResetBtn');
 var calOverlayEl = document.getElementById('calOverlay');
 var kDebugToggleBtn = document.getElementById('kDebugToggleBtn');
@@ -939,10 +928,15 @@ function connectBridge() {
   };
   bridgeWs.onclose = function() {
     bridgeReady = false;
+    tvAutoCalRunning = false;
     setBridgeStatus('Bridge disconnected — retry in 3s', 'warn');
     clearOverlay();
-    hideTvCalOverlay();
+    if (calOverlayEl) {
+      calOverlayEl.classList.add('hidden');
+      calOverlayEl.innerHTML = '';
+    }
     if (kDebugEnabled) setKDebugEnabled(false);
+    applyTvCalStatusUI();
     setTimeout(connectBridge, 3000);
   };
   bridgeWs.onmessage = function(ev) {
@@ -956,7 +950,7 @@ function applyKinectStatus(kinectOk, helloLike) {
   var modeHelp = document.getElementById('kinectModeHelp');
   if (modeHelp) {
     modeHelp.textContent = bridgeKinectMode === 'depth'
-      ? ('Mode: depth (Body+Depth) | TV: ' + (bridgeTvReady ? 'calibrated' : 'NOT calibrated — run wizard'))
+      ? ('Mode: depth (Body+Depth) | TV: ' + (bridgeTvReady ? 'calibrated' : 'NOT calibrated — click Auto-Calibrate'))
       : ('Mode: body (SDK only) | TV: n/a');
   }
   setBridgeStatus(
@@ -969,6 +963,14 @@ function applyKinectStatus(kinectOk, helloLike) {
   applyTvCalStatusUI();
 }
 
+function describeAutoCalResult(m) {
+  var px = m.n_blob_px || 0;
+  var area = (typeof m.area_m2 === 'number') ? m.area_m2.toFixed(3) : '-';
+  var ea = (typeof m.edge_a_m === 'number') ? m.edge_a_m.toFixed(3) : '-';
+  var eb = (typeof m.edge_b_m === 'number') ? m.edge_b_m.toFixed(3) : '-';
+  return 'TV blob=' + px + 'px, area=' + area + 'm² (' + ea + '×' + eb + 'm)';
+}
+
 function handleBridgeMsg(m) {
   var op = m.op;
   if (op === 'hello') {
@@ -978,34 +980,28 @@ function handleBridgeMsg(m) {
     applyKinectStatus(!!m.kinect_ok, true);
   } else if (op === 'hand') {
     onHandFrame(m);
-  } else if (op === 'tv_calib_started') {
-    if (m.status) bridgeTvStatus = m.status;
-    showTvCalOverlay();
+  } else if (op === 'tv_autocalib_started') {
+    tvAutoCalRunning = true;
+    tvAutoCalLastInfo = 'Capturing depth frames…';
+    setBridgeStatus('TV auto-calibration: capturing depth…', 'warn');
     applyTvCalStatusUI();
-  } else if (op === 'tv_calib_progress') {
-    if (m.status) bridgeTvStatus = m.status;
-    applyTvCalStatusUI();
-    if (m.result && m.result.reason && m.result.ok === false && !m.result.done) {
-      setBridgeStatus('Calibration: ' + m.result.reason, 'warn');
-    }
-  } else if (op === 'tv_calib_done') {
+  } else if (op === 'tv_autocalib_done') {
+    tvAutoCalRunning = false;
     bridgeTvReady = !!m.ready;
-    if (m.status) bridgeTvStatus = m.status;
-    hideTvCalOverlay();
+    if (m.tv_status) bridgeTvStatus = m.tv_status;
+    tvAutoCalLastInfo = describeAutoCalResult(m);
+    setBridgeStatus('TV calibrated — interaction box live (' + tvAutoCalLastInfo + ')', 'ok');
     applyTvCalStatusUI();
-    if (m.ready) {
-      setBridgeStatus('TV calibrated — interaction box live', 'ok');
-    } else {
-      setBridgeStatus('TV calibration failed: ' + (m.reason || 'unknown'), 'err');
-    }
-  } else if (op === 'tv_calib_cancelled') {
-    if (m.status) bridgeTvStatus = m.status;
-    hideTvCalOverlay();
+  } else if (op === 'tv_autocalib_failed') {
+    tvAutoCalRunning = false;
+    tvAutoCalLastInfo = 'Last attempt failed: ' + (m.reason || 'unknown');
+    setBridgeStatus('TV auto-calibration failed: ' + (m.reason || 'unknown'), 'err');
     applyTvCalStatusUI();
   } else if (op === 'tv_calib_reset') {
+    tvAutoCalRunning = false;
     bridgeTvReady = false;
     if (m.status) bridgeTvStatus = m.status;
-    hideTvCalOverlay();
+    tvAutoCalLastInfo = '';
     applyTvCalStatusUI();
     setBridgeStatus('TV calibration cleared', 'warn');
   }
@@ -1066,13 +1062,10 @@ function onHandFrame(m) {
   if (m.tv_status) bridgeTvStatus = m.tv_status;
   if (typeof m.tv_ready === 'boolean') bridgeTvReady = m.tv_ready;
 
-  // Refresh wizard UI live (esp. body-tracked indicator).
-  if (bridgeTvStatus.mode === 'capturing') applyTvCalStatusUI(m);
-
   renderOverlay(m);
   updateKinectDebug(m);
 
-  if (bridgeTvStatus.mode === 'capturing') {
+  if (tvAutoCalRunning) {
     if (pinchActive) endPinch();
     return;
   }
@@ -1135,9 +1128,7 @@ function updateKinectDebug(m) {
   var distCm = (typeof m.tip_signed_dist_m === 'number' && m.tip_signed_dist_m >= 0)
     ? (m.tip_signed_dist_m * 100).toFixed(1) + 'cm'
     : '-';
-  var tvLabel = m.tv_ready ? 'ready' : (bridgeTvStatus.mode === 'capturing'
-    ? ('cal ' + (bridgeTvStatus.captured || 0) + '/' + (bridgeTvStatus.total || 4))
-    : 'not calibrated');
+  var tvLabel = m.tv_ready ? 'ready' : (tvAutoCalRunning ? 'auto-calibrating' : 'not calibrated');
   kinectDebugStats.textContent =
     'tracked: ' + (m.tracked ? 'yes' : 'no') +
     ' | tv: ' + tvLabel +
@@ -1145,106 +1136,57 @@ function updateKinectDebug(m) {
     ' | body: ' + (m.body_tracked ? 'yes' : 'no');
 }
 
-// --- TV calibration wizard UI ---
-var TV_CAL_LABELS = ['top-left', 'top-right', 'bottom-right', 'bottom-left'];
-
-function showTvCalOverlay() {
-  if (!calOverlayEl) return;
-  calOverlayEl.innerHTML = '';
-  var corners = [[0,0], [1,0], [1,1], [0,1]];
-  for (var i = 0; i < 4; i++) {
-    var t = document.createElement('div');
-    t.className = 'cal-target';
-    t.setAttribute('data-idx', String(i));
-    t.style.left = (corners[i][0] * 100) + '%';
-    t.style.top  = (corners[i][1] * 100) + '%';
-    calOverlayEl.appendChild(t);
+// --- TV calibration UI (auto-fit only) ---
+function applyTvCalStatusUI(_handFrame) {
+  if (tvAutoCalBtn) {
+    tvAutoCalBtn.disabled = !!tvAutoCalRunning;
+    tvAutoCalBtn.textContent = tvAutoCalRunning
+      ? 'Auto-Calibrating…'
+      : (bridgeTvReady ? 'Re-run Auto-Calibrate' : 'Auto-Calibrate TV (Depth)');
   }
-  var msg = document.createElement('div');
-  msg.className = 'cal-instruct';
-  msg.id = 'calInstruct';
-  calOverlayEl.appendChild(msg);
-  calOverlayEl.classList.remove('hidden');
-}
-
-function hideTvCalOverlay() {
-  if (!calOverlayEl) return;
-  calOverlayEl.classList.add('hidden');
-  calOverlayEl.innerHTML = '';
-}
-
-function applyTvCalStatusUI(handFrame) {
-  var capturing = bridgeTvStatus.mode === 'capturing';
-  if (tvCalPanel) tvCalPanel.classList.toggle('hidden', !capturing);
-  if (tvCalStartBtn) tvCalStartBtn.disabled = capturing;
-
-  var captured = bridgeTvStatus.captured || 0;
-  var total = bridgeTvStatus.total || 4;
-  var idx = bridgeTvStatus.current_corner || 0;
-  if (idx >= total) idx = total - 1;
-  var label = TV_CAL_LABELS[idx] || '?';
-
-  if (tvCalRedoBtn) tvCalRedoBtn.disabled = !capturing || captured === 0;
-  if (tvCalStepText) {
-    if (capturing) {
-      tvCalStepText.innerHTML =
-        'Step ' + (idx + 1) + ' / ' + total + ': <b>' + label + '</b>'
-        + ' (captured ' + captured + '/' + total + ')';
+  if (tvAutoCalInfoEl) {
+    if (tvAutoCalRunning) {
+      tvAutoCalInfoEl.textContent = 'Capturing ~1.5s of depth, RANSAC-fitting plane…';
+      tvAutoCalInfoEl.style.color = '#dd6';
+    } else if (tvAutoCalLastInfo) {
+      tvAutoCalInfoEl.textContent = tvAutoCalLastInfo;
+      tvAutoCalInfoEl.style.color = bridgeTvReady ? '#7c7' : '#e88';
     } else {
-      tvCalStepText.textContent = '';
+      tvAutoCalInfoEl.textContent = '';
     }
   }
-  // Body tracking indicator
-  if (tvCalBodyHint) {
-    var bodyOk = !!(handFrame && handFrame.body_tracked);
-    tvCalBodyHint.className = bodyOk ? 'tv-cal-bodyok' : 'tv-cal-bodybad';
-    tvCalBodyHint.textContent = bodyOk
-      ? 'SDK body OK — Confirm will lock in HandTipRight as this corner'
-      : 'SDK body not visible — stand in front of Kinect';
-  }
-  // Top status text
   if (tvCalStatusTextEl) {
-    if (bridgeTvReady) {
+    if (tvAutoCalRunning) {
+      tvCalStatusTextEl.textContent = 'TV: auto-calibrating…';
+      tvCalStatusTextEl.style.color = '#dd6';
+    } else if (bridgeTvReady) {
       tvCalStatusTextEl.textContent = 'TV: calibrated';
       tvCalStatusTextEl.style.color = '#7c7';
-    } else if (capturing) {
-      tvCalStatusTextEl.textContent =
-        'TV: calibrating (' + captured + '/' + total + ')';
-      tvCalStatusTextEl.style.color = '#dd6';
     } else {
       tvCalStatusTextEl.textContent = 'TV: not calibrated';
       tvCalStatusTextEl.style.color = '#aaa';
     }
   }
-  // Corner overlay highlights
-  if (calOverlayEl && !calOverlayEl.classList.contains('hidden')) {
-    var targets = calOverlayEl.querySelectorAll('.cal-target');
-    for (var i = 0; i < targets.length; i++) {
-      targets[i].classList.remove('active', 'done');
-      if (i < captured) targets[i].classList.add('done');
-      else if (i === captured) targets[i].classList.add('active');
-    }
-    var msg = document.getElementById('calInstruct');
-    if (msg) {
-      msg.innerHTML = capturing
-        ? ('Aim right hand at <b>' + label + '</b> corner, then click <b>Confirm</b> in the sidebar.')
-        : '';
-    }
+  // Legacy on-canvas overlay (no longer used by auto-cal) — keep hidden.
+  if (calOverlayEl) {
+    calOverlayEl.classList.add('hidden');
+    calOverlayEl.innerHTML = '';
   }
 }
 
 // --- Wire up buttons ---
-if (tvCalStartBtn) tvCalStartBtn.onclick = function() {
-  sendBridge({ op: 'tv_calib_start' });
-};
-if (tvCalConfirmBtn) tvCalConfirmBtn.onclick = function() {
-  sendBridge({ op: 'tv_calib_confirm' });
-};
-if (tvCalRedoBtn) tvCalRedoBtn.onclick = function() {
-  sendBridge({ op: 'tv_calib_redo' });
-};
-if (tvCalCancelBtn) tvCalCancelBtn.onclick = function() {
-  sendBridge({ op: 'tv_calib_cancel' });
+if (tvAutoCalBtn) tvAutoCalBtn.onclick = function() {
+  if (tvAutoCalRunning) return;
+  if (!confirm(
+    'Auto-Calibrate TV?\n\n' +
+    '• Make sure the TV screen is fully visible to the Kinect\n' +
+    '• Clear hands / people from view\n' +
+    '• The bridge will capture ~1.5s of depth and fit the dominant plane'
+  )) return;
+  tvAutoCalRunning = true;
+  tvAutoCalLastInfo = 'Capturing depth frames…';
+  applyTvCalStatusUI();
+  sendBridge({ op: 'tv_autocalib_capture' });
 };
 if (tvCalResetBtn) tvCalResetBtn.onclick = function() {
   if (confirm('Clear stored TV calibration?')) sendBridge({ op: 'tv_calib_reset' });
