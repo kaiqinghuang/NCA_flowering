@@ -143,9 +143,14 @@ class KinectDepthSource:
                             if not b.is_tracked:
                                 continue
                             j = b.joints[JointType_HandTipRight]
+                            # Kinect SDK CameraSpacePoint uses Y-up; the rest of
+                            # the bridge (depth-pixel projection, plane fit,
+                            # signed-distance test) uses standard CV Y-down.
+                            # Flip Y once here so everything downstream is
+                            # consistent.
                             tip_xyz = (
                                 float(j.Position.x),
-                                float(j.Position.y),
+                                -float(j.Position.y),
                                 float(j.Position.z),
                             )
                             tip_tracked = j.TrackingState == TrackingState_Tracked

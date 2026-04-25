@@ -152,9 +152,12 @@ class KinectSource:
                 hand.TrackingState == TrackingState_Tracked
                 and thumb.TrackingState == TrackingState_Tracked
             )
-            hp = (hand.Position.x, hand.Position.y, hand.Position.z)
-            tp = (thumb.Position.x, thumb.Position.y, thumb.Position.z)
-            wp = (wrist.Position.x, wrist.Position.y, wrist.Position.z)
+            # Flip SDK Y-up → standard CV Y-down. Keeps body-mode joints in the
+            # same convention as the depth-pixel projection used elsewhere in
+            # the bridge.
+            hp = (hand.Position.x, -hand.Position.y, hand.Position.z)
+            tp = (thumb.Position.x, -thumb.Position.y, thumb.Position.z)
+            wp = (wrist.Position.x, -wrist.Position.y, wrist.Position.z)
             try:
                 state = int(chosen.hand_right_state)
             except Exception:  # noqa: BLE001
