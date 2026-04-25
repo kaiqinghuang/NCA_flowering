@@ -321,7 +321,7 @@ class KinectDepthSource:
                 # touching code (matches knobs documented in README.md).
                 eps_m = float(os.environ.get("BRIDGE_AUTOFIT_EPS_M", "0.015"))
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
-                trim_frac = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_FRAC", "0.75"))
+                trim_frac = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_FRAC", "0.85"))
                 trim_min_m = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_MIN_M", "0.10"))
                 trim_bin_m = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_BIN_M", "0.01"))
                 result = auto_calibrate_tv_from_depth(
