@@ -969,11 +969,16 @@ function describeAutoCalResult(m) {
   var ea = (typeof m.edge_a_m === 'number') ? m.edge_a_m.toFixed(3) : '-';
   var eb = (typeof m.edge_b_m === 'number') ? m.edge_b_m.toFixed(3) : '-';
   var s = 'TV blob=' + px + 'px, area=' + area + 'm² (' + ea + '×' + eb + 'm)';
-  var ti = m.trim_info || null;
-  if (ti && ti.trimmed) {
-    var tw = (typeof ti.trim_w_m === 'number') ? (ti.trim_w_m * 100).toFixed(1) : '-';
-    var th = (typeof ti.trim_h_m === 'number') ? (ti.trim_h_m * 100).toFixed(1) : '-';
-    s += ' · trimmed ' + tw + '×' + th + 'cm of co-planar fringe';
+  var ci = m.color_info || null;
+  if (ci) {
+    if (ci.color_refined) {
+      var before = ci.n_blob_before || 0;
+      var after = ci.n_after_largest_cc || 0;
+      var pct = (typeof ci.removed_pct === 'number') ? ci.removed_pct.toFixed(1) : '?';
+      s += ' · color: ' + before + '→' + after + 'px (removed ' + pct + '% as bright, max V=' + (ci.max_v_used || '?') + ')';
+    } else if (ci.reason) {
+      s += ' · color: skipped (' + ci.reason + ')';
+    }
   }
   return s;
 }

@@ -415,170 +415,143 @@ def _ransac_plane(
     return refit
 
 
-def _trim_rect_by_density(
-    pts2d: np.ndarray,
-    box2d: np.ndarray,
-    bin_size_m: float = 0.01,
-    density_thresh_frac: float = 0.65,
-    min_run_m: float = 0.10,
+def _refine_blob_with_color(
+    blob_mask_depth: np.ndarray,
+    depth_to_color_xy: np.ndarray,
+    color_bgr: np.ndarray,
+    max_v: float,
+    morph_close_px: int,
+    cv2_mod,
 ) -> Tuple[np.ndarray, dict]:
-    """Shrink a rotated bounding rect to its **dense core** along each axis.
+    """Refine a depth-derived blob mask using the corresponding RGB pixels.
 
-    ``cv2.minAreaRect`` returns the smallest rotated rectangle that
-    encloses every point. When the TV blob is contiguous with co-planar
-    structures that have visible gaps (e.g. parallel wood slats butting
-    up against the bezel), the rect over-shoots into them — even though
-    those extensions are mostly empty space punctuated by occupied stripes.
+    Co-planar non-screen structures (wood slats, bezel ornaments, …)
+    survive the depth-only pipeline because they sit *on* the TV plane.
+    But visually they are bright/saturated, while the powered-off (or
+    dark-content) TV screen is near-black. We exploit that asymmetry:
 
-    The TV's screen surface, however, is uniformly dense: along its long
-    axis every column has the full short-axis extent occupied. We exploit
-    that by:
+        for each depth pixel in the blob:
+            (cx, cy) = SDK CoordinateMapper(depth pixel)        # done by caller
+            sample color_bgr[cy, cx]
+            keep the depth pixel iff  max(B, G, R) ≤ max_v
 
-    1. Re-expressing each blob point in the rect's local axes
-       ``(u_rect, v_rect)`` (long axis vs short axis).
-    2. Binning to a 1 cm grid → 2D occupancy mask.
-    3. Computing per-column density along ``u_rect`` and per-row density
-       along ``v_rect`` (each as the fraction of the orthogonal axis that
-       is occupied).
-    4. Keeping the **longest contiguous run of bins** whose density is
-       ≥ ``density_thresh_frac × peak_density`` along each axis.
-    5. Mapping the trimmed bin range back to the rect-local coordinates,
-       and then to the parent (u_tmp, v_tmp) basis as 4 new corners.
-
-    A safety floor of ``min_run_m`` per axis keeps the algorithm from
-    over-trimming if the density signal is noisy.
+    A small morphological close fills speckle holes from screen
+    reflections / interpolation noise, then we keep only the largest
+    connected component as the final TV mask.
 
     Args:
-        pts2d:  (N, 2) blob points in the parent (u_tmp, v_tmp) basis.
-        box2d:  (4, 2) initial rect corners (CCW), same basis.
-        bin_size_m:           grid resolution in metres (1 cm default).
-        density_thresh_frac:  fraction of peak density that counts as
-                              "dense" (0.0 disables trimming).
-        min_run_m:            minimum allowed extent per axis after
-                              trimming (otherwise revert to the original
-                              rect bound on that axis).
+        blob_mask_depth:    (DEPTH_H, DEPTH_W) bool, the depth-only blob.
+        depth_to_color_xy:  (DEPTH_H*DEPTH_W, 2) float32 — the SDK's
+                            ``MapDepthFrameToColorSpace`` output for the
+                            same depth frame the blob was derived from.
+                            Invalid mappings are encoded as ±inf.
+        color_bgr:          (Hc, Wc, 3) uint8 BGR — the colour frame
+                            captured at the same instant.
+        max_v:              maximum brightness (0–255) to count as "TV".
+                            Wood and bezels are brighter than this.
+        morph_close_px:     square kernel size for closing pinholes in
+                            the kept mask (px in depth space). 0 = off.
+        cv2_mod:            the imported ``cv2`` module (passed in to
+                            avoid re-importing it inside this hot path).
 
     Returns:
-        new_box2d: (4, 2) trimmed rect corners in the same basis,
-                   ordered (u_lo,v_lo) → (u_hi,v_lo) → (u_hi,v_hi) → (u_lo,v_hi).
-        info:      diagnostics (peak densities, kept extents, trim amounts).
+        refined_mask:  (DEPTH_H, DEPTH_W) bool, after color filter +
+                       morph close + largest-CC. May fall back to
+                       ``blob_mask_depth`` if the colour pass cannot
+                       confidently produce a usable refinement; the
+                       returned ``info`` dict explains which path was
+                       taken.
+        info:          diagnostics (counts, percentages, why-skipped, …).
     """
-    if density_thresh_frac <= 0.0:
-        return box2d.copy(), {"trimmed": False, "reason": "disabled"}
+    Hc, Wc = color_bgr.shape[:2]
+    blob_idx = np.flatnonzero(blob_mask_depth.ravel())
+    n_total = int(blob_idx.size)
+    if n_total == 0:
+        return blob_mask_depth.copy(), {
+            "color_refined": False,
+            "reason": "empty blob",
+        }
 
-    e1 = box2d[1] - box2d[0]
-    e2 = box2d[2] - box2d[1]
-    e1_len = float(np.linalg.norm(e1))
-    e2_len = float(np.linalg.norm(e2))
-    if e1_len < 1e-9 or e2_len < 1e-9:
-        return box2d.copy(), {"trimmed": False, "reason": "degenerate rect"}
-
-    if e1_len >= e2_len:
-        long_axis = e1 / e1_len
-        short_axis = e2 / e2_len
-        long_half = e1_len / 2.0
-        short_half = e2_len / 2.0
-    else:
-        long_axis = e2 / e2_len
-        short_axis = e1 / e1_len
-        long_half = e2_len / 2.0
-        short_half = e1_len / 2.0
-    center = box2d.mean(axis=0)
-
-    rel = pts2d.astype(np.float64) - center
-    u_rect = rel @ long_axis
-    v_rect = rel @ short_axis
-
-    nu = max(8, int(np.ceil(2 * long_half / bin_size_m)) + 1)
-    nv = max(8, int(np.ceil(2 * short_half / bin_size_m)) + 1)
-    ui = np.clip(((u_rect + long_half) / bin_size_m).astype(np.int32), 0, nu - 1)
-    vi = np.clip(((v_rect + short_half) / bin_size_m).astype(np.int32), 0, nv - 1)
-    grid = np.zeros((nu, nv), dtype=bool)
-    grid[ui, vi] = True
-
-    u_density = grid.sum(axis=1).astype(np.float64) / float(max(1, nv))
-    v_density = grid.sum(axis=0).astype(np.float64) / float(max(1, nu))
-
-    def _longest_run_above(arr: np.ndarray, thresh: float) -> Tuple[int, int]:
-        n = int(len(arr))
-        if n == 0:
-            return 0, -1
-        above = arr >= thresh
-        best_s, best_e, best_len = 0, n - 1, 0
-        i = 0
-        while i < n:
-            if not above[i]:
-                i += 1
-                continue
-            j = i
-            while j < n and above[j]:
-                j += 1
-            run_len = j - i
-            if run_len > best_len:
-                best_len = run_len
-                best_s, best_e = i, j - 1
-            i = j
-        if best_len == 0:
-            return 0, n - 1
-        return best_s, best_e
-
-    peak_u = float(u_density.max()) if u_density.size else 0.0
-    peak_v = float(v_density.max()) if v_density.size else 0.0
-
-    if peak_u > 0.05:
-        u_s, u_e = _longest_run_above(u_density, peak_u * density_thresh_frac)
-    else:
-        u_s, u_e = 0, nu - 1
-    if peak_v > 0.05:
-        v_s, v_e = _longest_run_above(v_density, peak_v * density_thresh_frac)
-    else:
-        v_s, v_e = 0, nv - 1
-
-    u_lo = -long_half + u_s * bin_size_m
-    u_hi = -long_half + (u_e + 1) * bin_size_m
-    v_lo = -short_half + v_s * bin_size_m
-    v_hi = -short_half + (v_e + 1) * bin_size_m
-    u_lo = max(u_lo, -long_half)
-    u_hi = min(u_hi, +long_half)
-    v_lo = max(v_lo, -short_half)
-    v_hi = min(v_hi, +short_half)
-
-    reverted = []
-    if (u_hi - u_lo) < min_run_m:
-        u_lo, u_hi = -long_half, +long_half
-        reverted.append("u")
-    if (v_hi - v_lo) < min_run_m:
-        v_lo, v_hi = -short_half, +short_half
-        reverted.append("v")
-
-    new_box2d = np.array(
-        [
-            center + u_lo * long_axis + v_lo * short_axis,
-            center + u_hi * long_axis + v_lo * short_axis,
-            center + u_hi * long_axis + v_hi * short_axis,
-            center + u_lo * long_axis + v_hi * short_axis,
-        ],
-        dtype=np.float64,
+    cx = depth_to_color_xy[blob_idx, 0]
+    cy = depth_to_color_xy[blob_idx, 1]
+    valid = (
+        np.isfinite(cx)
+        & np.isfinite(cy)
+        & (cx >= 0)
+        & (cy >= 0)
+        & (cx < Wc - 0.5)
+        & (cy < Hc - 0.5)
     )
+    n_valid = int(valid.sum())
+    if n_valid < 200:
+        return blob_mask_depth.copy(), {
+            "color_refined": False,
+            "reason": f"only {n_valid} blob pixels mapped into color frame",
+            "n_blob_before": n_total,
+        }
 
-    rect_w = float(2 * long_half)
-    rect_h = float(2 * short_half)
-    kept_w = float(u_hi - u_lo)
-    kept_h = float(v_hi - v_lo)
+    cx_v = cx[valid].astype(np.int32)
+    cy_v = cy[valid].astype(np.int32)
+    bgr_samples = color_bgr[cy_v, cx_v]            # (n_valid, 3) uint8
+    v_chan = bgr_samples.max(axis=1)               # ≈ HSV V (fast proxy)
+    keep = v_chan <= max_v                         # bool mask over valid subset
+    n_keep = int(keep.sum())
+    if n_keep < max(200, n_total // 50):
+        # The colour filter wiped almost everything out — likely the TV is
+        # actually showing bright content during calibration, or max_v is
+        # set too low. Fall back to the unrefined depth blob so the user
+        # at least gets a calibration; the printed warning + UI message
+        # will point at BRIDGE_AUTOFIT_COLOR_MAX_V / the color frame.
+        return blob_mask_depth.copy(), {
+            "color_refined": False,
+            "reason": (
+                f"color filter kept only {n_keep}/{n_valid} pixels "
+                f"(max_v={max_v}); falling back to depth-only blob"
+            ),
+            "n_blob_before": n_total,
+            "n_valid_color": n_valid,
+            "n_dark_kept": n_keep,
+            "max_v_used": float(max_v),
+        }
+
+    # Build refined mask in depth-pixel space.
+    keep_indices = blob_idx[valid][keep]
+    refined = np.zeros(blob_mask_depth.shape, dtype=np.uint8)
+    refined.ravel()[keep_indices] = 1
+
+    # Tiny holes from depth/colour misalignment or screen reflections —
+    # close them so we don't fragment the TV into many small CCs.
+    if morph_close_px and morph_close_px > 0:
+        k = max(1, int(morph_close_px))
+        ker = cv2_mod.getStructuringElement(cv2_mod.MORPH_RECT, (k, k))
+        refined = cv2_mod.morphologyEx(refined, cv2_mod.MORPH_CLOSE, ker)
+
+    # Largest connected component = the TV.
+    n_lbl, labels, stats, _ = cv2_mod.connectedComponentsWithStats(refined, connectivity=8)
+    if n_lbl < 2:
+        return blob_mask_depth.copy(), {
+            "color_refined": False,
+            "reason": "no connected component after color filter",
+            "n_blob_before": n_total,
+            "n_valid_color": n_valid,
+            "n_dark_kept": n_keep,
+        }
+    sizes = stats[1:, cv2_mod.CC_STAT_AREA]
+    best = 1 + int(np.argmax(sizes))
+    final_mask = labels == best
+    final_size = int(sizes[best - 1])
+
     info = {
-        "trimmed": (rect_w - kept_w) > 1e-3 or (rect_h - kept_h) > 1e-3,
-        "rect_w_m": rect_w,
-        "rect_h_m": rect_h,
-        "kept_w_m": kept_w,
-        "kept_h_m": kept_h,
-        "trim_w_m": rect_w - kept_w,
-        "trim_h_m": rect_h - kept_h,
-        "peak_u_density": peak_u,
-        "peak_v_density": peak_v,
-        "density_thresh_frac": float(density_thresh_frac),
-        "reverted_axes": reverted,
+        "color_refined": True,
+        "n_blob_before": n_total,
+        "n_valid_color": n_valid,
+        "n_dark_kept": n_keep,
+        "n_after_largest_cc": final_size,
+        "removed_pct": float(1.0 - final_size / max(1, n_total)) * 100.0,
+        "max_v_used": float(max_v),
+        "color_frame_size": [int(Hc), int(Wc)],
     }
-    return new_box2d, info
+    return final_mask, info
 
 
 def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
@@ -624,6 +597,9 @@ def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
 
 def auto_calibrate_tv_from_depth(
     depth_frames: Iterable[np.ndarray],
+    *,
+    color_bgr: Optional[np.ndarray] = None,
+    depth_to_color_xy: Optional[np.ndarray] = None,
     on_plane_eps_m: float = 0.015,
     ransac_iters: int = 240,
     ransac_inlier_thresh_m: float = 0.02,
@@ -633,24 +609,28 @@ def auto_calibrate_tv_from_depth(
     z_min_m: float = 0.4,
     z_max_m: float = 4.5,
     morph_open_px: int = 3,
-    density_trim_frac: float = 0.65,
-    density_trim_bin_m: float = 0.01,
-    density_trim_min_run_m: float = 0.10,
+    color_max_v: float = 90.0,
+    color_close_px: int = 3,
 ) -> dict:
-    """One-shot TV plane + 4-corner derivation from a depth-frame stack.
+    """One-shot TV plane + 4-corner derivation, depth + colour fused.
 
     Steps:
         1. Stack ``depth_frames`` into one (sub-sampled) point cloud.
         2. RANSAC fit the dominant plane (refit via SVD on inliers).
         3. Compute on-plane mask on the LAST frame; morph-open to break
-           thin connections to neighbouring co-planar wood strips.
-        4. Largest connected component = TV blob.
-        5. Build a temporary basis on the plane, project blob pixels to
-           plane (u, v), fit a min-area rotated rectangle.
-        6. **Density-trim** that rect along its own axes — co-planar
-           extensions like wood slats with gaps between them have lower
-           per-row/per-column density than the solid TV screen, so we
-           keep only the rect's dense core.
+           thin depth-connected bridges to neighbouring co-planar wood
+           strips (cheap, doesn't fight us further down).
+        4. Largest connected component = depth-only TV blob candidate.
+        5. **(NEW) Colour refinement.** If a colour frame and the SDK's
+           depth→colour mapping were supplied, look up each blob pixel's
+           RGB value and discard everything brighter than ``color_max_v``
+           — wood/bezels are bright, the TV screen is near-black. Take
+           the largest connected component of what survives. (Falls back
+           gracefully to the depth-only blob if mapping is unavailable
+           or the filter wipes everything.)
+        6. Project the refined blob to the plane (u, v), fit a min-area
+           rotated rectangle. **No further geometric trim** — the colour
+           pass already removed the wood, so the rect is tight.
         7. Reconstruct 3D corners → sort into TL/TR/BR/BL.
 
     Returns a dict (always with ``ok``):
@@ -658,9 +638,10 @@ def auto_calibrate_tv_from_depth(
         corners_3d        : list of 4 (x, y, z) tuples (TL, TR, BR, BL)
         plane             : (a, b, c, d) with origin-side positive
         n_blob_px         : int   pixel count of the chosen TV blob
-        area_m2           : float TV rectangle area in m² (after trim)
+                                  (after colour refinement, if applied)
+        area_m2           : float TV rectangle area in m²
         ransac_inlier_pts : int   how many points fed to RANSAC
-        trim_info         : diagnostic dict from the density-trim stage
+        color_info        : diagnostic dict from the colour-refine stage
     """
     try:
         import cv2  # type: ignore
@@ -734,7 +715,7 @@ def auto_calibrate_tv_from_depth(
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
         mask_u8 = cv2.morphologyEx(mask_u8, cv2.MORPH_OPEN, kernel, iterations=1)
 
-    # ---- 4. Largest connected blob ----
+    # ---- 4. Largest connected blob (depth-only candidate) ----
     n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
     if n_lbl <= 1:
         return {"ok": False, "reason": "no connected on-plane blobs"}
@@ -746,7 +727,43 @@ def auto_calibrate_tv_from_depth(
         return {"ok": False, "reason": f"largest blob too small ({best_size}px < {min_blob_px})"}
     blob_mask = labels == best_lbl
 
-    # ---- 5. Project blob to plane (u_tmp, v_tmp), min-area rect, sort corners ----
+    # ---- 5. Colour refinement: throw away non-black pixels (wood, bezel). ----
+    if color_bgr is not None and depth_to_color_xy is not None:
+        if depth_to_color_xy.shape[0] != DEPTH_H * DEPTH_W:
+            color_info = {
+                "color_refined": False,
+                "reason": (
+                    f"depth_to_color_xy length {depth_to_color_xy.shape[0]} "
+                    f"!= expected {DEPTH_H * DEPTH_W}"
+                ),
+            }
+        else:
+            blob_mask, color_info = _refine_blob_with_color(
+                blob_mask,
+                depth_to_color_xy,
+                np.ascontiguousarray(color_bgr, dtype=np.uint8),
+                max_v=float(color_max_v),
+                morph_close_px=int(color_close_px),
+                cv2_mod=cv2,
+            )
+            if color_info.get("color_refined"):
+                best_size = int(color_info.get("n_after_largest_cc", best_size))
+            if best_size < min_blob_px:
+                return {
+                    "ok": False,
+                    "reason": (
+                        f"after color refine only {best_size}px (<{min_blob_px}); "
+                        "TV may be showing bright content during calibration "
+                        "or BRIDGE_AUTOFIT_COLOR_MAX_V is too low"
+                    ),
+                }
+    else:
+        color_info = {
+            "color_refined": False,
+            "reason": "no color frame / mapping supplied (depth-only fit)",
+        }
+
+    # ---- 6. Project refined blob to plane, min-area rect (no extra trim). ----
     n_vec = np.array([a, b, c], dtype=np.float64)
     arbitrary = np.array([1.0, 0.0, 0.0]) if abs(n_vec[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     u_tmp = arbitrary - np.dot(arbitrary, n_vec) * n_vec
@@ -777,18 +794,8 @@ def auto_calibrate_tv_from_depth(
     rect = cv2.minAreaRect(pts2d.reshape(-1, 1, 2))
     box2d = cv2.boxPoints(rect)  # (4, 2) in same units as pts2d (meters)
 
-    # ---- 6. Density-trim the rect to exclude sparse co-planar extensions
-    #         (e.g. wood slats with gaps butting up against the TV bezel).
-    box2d_trimmed, trim_info = _trim_rect_by_density(
-        pts2d.astype(np.float64),
-        np.asarray(box2d, dtype=np.float64),
-        bin_size_m=float(density_trim_bin_m),
-        density_thresh_frac=float(density_trim_frac),
-        min_run_m=float(density_trim_min_run_m),
-    )
-
     raw_corners = []
-    for u_c, v_c in box2d_trimmed:
+    for u_c, v_c in box2d:
         c3 = origin_tmp + float(u_c) * u_tmp + float(v_c) * v_tmp
         raw_corners.append(c3)
     raw_corners_arr = np.stack(raw_corners, axis=0)  # (4, 3)
@@ -808,5 +815,5 @@ def auto_calibrate_tv_from_depth(
         "ransac_inlier_pts": int(ransac_pts.shape[0]),
         "edge_a_m": edge_a,
         "edge_b_m": edge_b,
-        "trim_info": trim_info,
+        "color_info": color_info,
     }

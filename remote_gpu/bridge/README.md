@@ -82,35 +82,43 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
 1. Make sure the **TV screen is fully visible** to the Kinect, and
    **clear hands / people** out of the depth view (so the largest
    co-planar blob really is the TV).
-2. Click **Auto-Calibrate TV (Depth)**.
-3. The bridge captures ~1.5 s of depth, then:
+2. Make sure the TV screen is **black or showing dark content**
+   during calibration (the algorithm uses the screen's near-zero
+   brightness to distinguish it from any surrounding wood/bezel).
+3. Click **Auto-Calibrate TV (Depth)**.
+4. The bridge captures ~1.5 s of depth + 1 colour frame, then:
    * RANSAC-fits the dominant 3D plane,
    * keeps depth pixels within `BRIDGE_AUTOFIT_EPS_M` of that plane,
    * morph-opens that mask (`BRIDGE_AUTOFIT_OPEN_PX`) to break thin
-     bridges to neighbouring co-planar wood strips,
-   * picks the **largest connected component** as the TV blob,
-   * wraps a `cv2.minAreaRect` around the blob's in-plane (u, v)
-     points,
-   * **density-trims** that rect along its long & short axes — co-planar
-     fringes like parallel wood slats with gaps between them have
-     visibly lower per-row/per-column occupancy than the solid TV
-     screen, so the trim shrinks the rect until each axis only contains
-     the dense core (`BRIDGE_AUTOFIT_TRIM_FRAC` controls the cutoff;
-     `BRIDGE_AUTOFIT_TRIM_MIN_M` is a per-axis safety floor).
-   * Reconstructs 4 trimmed corners in 3D, sorts into TL/TR/BR/BL by
-     (X, Z): front (smaller Z) = top, right (larger X) = right,
+     depth bridges to neighbouring co-planar surfaces,
+   * picks the **largest connected component** as the depth-only
+     candidate blob,
+   * **uses the SDK `CoordinateMapper` to project every blob pixel
+     into the colour frame** and discards anything brighter than
+     `BRIDGE_AUTOFIT_COLOR_MAX_V` (default `90`). Wood/bezel survive
+     the depth pipeline because they sit on the TV plane, but they
+     are visibly bright while the powered-off TV is near-black —
+     this single test cleanly removes them.
+   * Closes pinholes (`BRIDGE_AUTOFIT_COLOR_CLOSE_PX`) and takes the
+     largest CC again as the final TV mask,
+   * Wraps a `cv2.minAreaRect` around the colour-refined blob's
+     in-plane (u, v) points → 4 corners in 3D,
+   * Sorts into TL/TR/BR/BL by (X, Z): front (smaller Z) = top,
+     right (larger X) = right,
    * SVD-refits the plane on the 4 sorted corners and solves the
      homography to the canvas. Result saved to `tv_calibration.json`.
 
-If the wood strips around the TV are co-planar *and* contiguous, the
-density trim should clip them off automatically — the status bar will
-show "trimmed N×M cm of co-planar fringe". If trimming is too
-aggressive (eats into the TV), raise `BRIDGE_AUTOFIT_TRIM_FRAC`
-(e.g. 0.55 → 0.75 keeps less); if it is not aggressive enough (slats
-remain), lower it (e.g. 0.65 → 0.50). You can also bump the morph-open
-kernel (`BRIDGE_AUTOFIT_OPEN_PX=5`) or tighten the on-plane tolerance
-(`BRIDGE_AUTOFIT_EPS_M=0.010`) to physically detach more of the slats
-from the TV blob upstream of the trim.
+The status bar will show e.g. `color: 8214→5103px (removed 37.9% as
+bright)`, telling you exactly how much of the depth blob was wood/bezel.
+
+**Tuning the colour pass:**
+* If wood/bezel is still inside the rect → lower
+  `BRIDGE_AUTOFIT_COLOR_MAX_V` (e.g. `90 → 60`).
+* If too much of the TV is being eaten (status shows the algorithm fell
+  back to depth-only because `<2 %` survived) → raise it (`90 → 130`)
+  or check that the TV is actually showing dark content.
+* To disable the colour pass entirely (e.g. debugging): set
+  `BRIDGE_AUTOFIT_COLOR_ENABLE=0`.
 
 **Reset TV Calibration** deletes the saved file. Re-run Auto-Calibrate
 any time the camera moves.
@@ -141,9 +149,9 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
 | `BRIDGE_AUTOFIT_EPS_M` | `0.015` | on-plane tolerance during auto-calibration |
 | `BRIDGE_AUTOFIT_OPEN_PX` | `3` | morph-open kernel (px) on the on-plane mask |
-| `BRIDGE_AUTOFIT_TRIM_FRAC` | `0.65` | density-trim cutoff as fraction of peak (0 disables trim) |
-| `BRIDGE_AUTOFIT_TRIM_MIN_M` | `0.10` | per-axis minimum kept extent before trim is reverted (m) |
-| `BRIDGE_AUTOFIT_TRIM_BIN_M` | `0.01` | density-grid bin size (m) |
+| `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
+| `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | max brightness (max(B,G,R), 0–255) to count as TV-black |
+| `BRIDGE_AUTOFIT_COLOR_CLOSE_PX` | `3` | morph-close kernel (px) on the colour-refined mask |
 
 Other auto-calibration parameters are currently set in code defaults
 (`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,

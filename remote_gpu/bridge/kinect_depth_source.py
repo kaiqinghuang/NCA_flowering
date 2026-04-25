@@ -1,6 +1,6 @@
-"""Unified Kinect v2 runtime: Body (for SDK debug) + Depth (everything else).
+"""Unified Kinect v2 runtime: Body + Depth + Color.
 
-Opens **Body | Depth** so we can:
+Opens **Body | Depth | Color** so we can:
 
 * Stream `HandTipRight` 3D position from the SDK skeleton — surfaced as a
   yellow marker in the depth-debug overlay (handy reference during
@@ -9,12 +9,15 @@ Opens **Body | Depth** so we can:
   a fingertip (point with smallest signed distance to the TV plane) — used
   at runtime to drive the canvas brush.
 * Run a one-shot **auto TV calibration** on demand: capture ~35 depth
-  frames, RANSAC-fit the dominant plane, isolate the largest co-planar
-  blob (= the TV screen), derive its 4 rectangle corners, sort them
-  TL/TR/BR/BL by (X, Z), and hand them off to the bridge for commit.
+  frames + 1 color frame, RANSAC-fit the dominant plane, isolate the
+  largest co-planar blob, then **use the SDK CoordinateMapper to look up
+  the RGB colour of every blob pixel and discard anything that isn't
+  near-black** (the TV screen is dark, the surrounding wood slats are
+  bright). The colour-refined blob's `cv2.minAreaRect` gives the 4
+  corners, sorted TL/TR/BR/BL by (X, Z) and committed by the bridge.
 
-The RGB color stream is **not** opened (saves USB bandwidth and CPU; the
-debug-color JPEG was removed in the depth-first redesign).
+The Color stream costs ~30 MB/s on USB-3 but we don't process it during
+the live loop — we only sample one frame during the calibration burst.
 """
 from __future__ import annotations
 
@@ -130,6 +133,7 @@ class KinectDepthSource:
         try:
             from pykinect2.PyKinectV2 import (
                 FrameSourceTypes_Body,
+                FrameSourceTypes_Color,
                 FrameSourceTypes_Depth,
                 JointType_HandTipRight,
                 TrackingState_Tracked,
@@ -142,7 +146,7 @@ class KinectDepthSource:
 
         try:
             runtime = PyKinectRuntime.PyKinectRuntime(
-                FrameSourceTypes_Body | FrameSourceTypes_Depth
+                FrameSourceTypes_Body | FrameSourceTypes_Depth | FrameSourceTypes_Color
             )
         except Exception as e:  # noqa: BLE001
             print(f"[kinect-depth] Failed to open Kinect runtime: {e}")
@@ -150,7 +154,7 @@ class KinectDepthSource:
             return
 
         self.started_ok = True
-        print("[kinect-depth] Runtime started (body + depth).")
+        print("[kinect-depth] Runtime started (body + depth + color).")
 
         last_debug_push = 0.0
 
@@ -280,10 +284,14 @@ class KinectDepthSource:
 
     def _do_auto_calibration(self, runtime) -> None:
         """Block the kinect thread briefly to capture a depth-frame stack and
-        fit the TV plane + 4 corners. Pushes ``tv_autocalib_*`` messages back
-        to the bridge via ``drain_pending_msgs``; the actual ``commit_auto``
-        on the shared TVCalibration runs on the asyncio thread (see main.py)
-        so we never race with the live frame loop.
+        one color frame, then fit the TV plane + 4 corners with a colour
+        refinement pass that excludes co-planar non-black structures (wood
+        slats, bezels, etc).
+
+        Pushes ``tv_autocalib_*`` messages back to the bridge via
+        ``drain_pending_msgs``; the actual ``commit_auto`` on the shared
+        TVCalibration runs on the asyncio thread (see main.py) so we never
+        race with the live frame loop.
         """
         self._autocal_in_progress = True
         try:
@@ -293,6 +301,8 @@ class KinectDepthSource:
             # pending messages when a new RawHandFrame arrives, and we are
             # about to block this thread for ~1.5s without emitting any.
             buf: list[np.ndarray] = []
+            last_color_bgr: Optional[np.ndarray] = None
+            last_depth_for_mapping: Optional[np.ndarray] = None
             t_start = time.time()
             t_deadline = t_start + 1.6
             target_frames = 35
@@ -301,14 +311,32 @@ class KinectDepthSource:
                 and time.time() < t_deadline
                 and len(buf) < target_frames
             ):
+                got_anything = False
                 if runtime.has_new_depth_frame():
                     d = runtime.get_last_depth_frame()
                     if d is not None:
-                        buf.append(np.asarray(d, dtype=np.uint16).copy())
-                else:
+                        df = np.asarray(d, dtype=np.uint16).copy()
+                        buf.append(df)
+                        last_depth_for_mapping = df  # remember for mapper
+                        got_anything = True
+                if runtime.has_new_color_frame():
+                    c = runtime.get_last_color_frame()
+                    if c is not None:
+                        # Kinect v2 color frame: 1920x1080 BGRA uint8 (4ch).
+                        try:
+                            ca = np.asarray(c, dtype=np.uint8).reshape(1080, 1920, 4)
+                            last_color_bgr = ca[:, :, :3].copy()  # drop alpha
+                        except Exception:  # noqa: BLE001
+                            pass
+                        got_anything = True
+                if not got_anything:
                     time.sleep(0.005)
-            print(f"[kinect-depth] autocal: captured {len(buf)} depth frames in "
-                  f"{time.time() - t_start:.2f}s")
+            elapsed = time.time() - t_start
+            print(
+                f"[kinect-depth] autocal: captured {len(buf)} depth frames + "
+                f"{'1' if last_color_bgr is not None else '0'} color in "
+                f"{elapsed:.2f}s"
+            )
             if len(buf) < 6:
                 self._push_msg({
                     "op": "tv_autocalib_failed",
@@ -316,21 +344,35 @@ class KinectDepthSource:
                 })
                 return
 
+            # Compute depth->color mapping for the LAST captured depth frame
+            # using the SDK's CoordinateMapper. Returns (DEPTH_H*DEPTH_W, 2)
+            # float32 array of color-image (x, y) coordinates per depth pixel.
+            depth_to_color_xy: Optional[np.ndarray] = None
+            color_enable = os.environ.get("BRIDGE_AUTOFIT_COLOR_ENABLE", "1") not in ("0", "false", "False")
+            if color_enable and last_color_bgr is not None and last_depth_for_mapping is not None:
+                try:
+                    depth_to_color_xy = self._map_depth_to_color(
+                        runtime, last_depth_for_mapping
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[kinect-depth] CoordinateMapper failed: {e}")
+                    depth_to_color_xy = None
+
             try:
                 # Env-var overrides let the operator tune behaviour without
                 # touching code (matches knobs documented in README.md).
                 eps_m = float(os.environ.get("BRIDGE_AUTOFIT_EPS_M", "0.015"))
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
-                trim_frac = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_FRAC", "0.78"))
-                trim_min_m = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_MIN_M", "0.10"))
-                trim_bin_m = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_BIN_M", "0.01"))
+                color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "90"))
+                color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
                 result = auto_calibrate_tv_from_depth(
                     buf,
+                    color_bgr=last_color_bgr if color_enable else None,
+                    depth_to_color_xy=depth_to_color_xy if color_enable else None,
                     on_plane_eps_m=eps_m,
                     morph_open_px=open_px,
-                    density_trim_frac=trim_frac,
-                    density_trim_bin_m=trim_bin_m,
-                    density_trim_min_run_m=trim_min_m,
+                    color_max_v=color_max_v,
+                    color_close_px=color_close_px,
                 )
             except Exception as e:  # noqa: BLE001
                 self._push_msg({
@@ -346,20 +388,21 @@ class KinectDepthSource:
                 })
                 return
 
-            trim_info = result.get("trim_info") or {}
-            trim_log = ""
-            if trim_info.get("trimmed"):
-                trim_log = (
-                    f"  trim={trim_info.get('trim_w_m', 0.0) * 100:.1f}cm×"
-                    f"{trim_info.get('trim_h_m', 0.0) * 100:.1f}cm"
-                    f"  kept={trim_info.get('kept_w_m', 0.0):.3f}×"
-                    f"{trim_info.get('kept_h_m', 0.0):.3f}m"
+            color_info = result.get("color_info") or {}
+            color_log = ""
+            if color_info.get("color_refined"):
+                color_log = (
+                    f"  color: {color_info.get('n_blob_before', 0)}→"
+                    f"{color_info.get('n_after_largest_cc', 0)}px "
+                    f"(removed {color_info.get('removed_pct', 0.0):.1f}% as bright)"
                 )
+            elif color_info:
+                color_log = f"  color: skipped ({color_info.get('reason', '?')})"
             print(
                 f"[kinect-depth] autocal: blob={result['n_blob_px']}px  "
                 f"area={result['area_m2']:.3f}m²  "
                 f"edges={result['edge_a_m']:.3f}×{result['edge_b_m']:.3f}m"
-                f"{trim_log}"
+                f"{color_log}"
             )
             self._push_msg({
                 "op": "tv_autocalib_corners_ready",
@@ -370,10 +413,42 @@ class KinectDepthSource:
                 "edge_a_m": float(result["edge_a_m"]),
                 "edge_b_m": float(result["edge_b_m"]),
                 "ransac_inlier_pts": int(result.get("ransac_inlier_pts", 0)),
-                "trim_info": trim_info,
+                "color_info": color_info,
             })
         finally:
             self._autocal_in_progress = False
+
+    @staticmethod
+    def _map_depth_to_color(runtime, depth_frame: np.ndarray) -> np.ndarray:
+        """Use Kinect SDK CoordinateMapper to project every depth pixel to
+        color-image coordinates.
+
+        Args:
+            runtime:      live ``PyKinectRuntime`` instance
+            depth_frame:  uint16 depth frame, length DEPTH_W*DEPTH_H
+
+        Returns:
+            (DEPTH_H*DEPTH_W, 2) float32 array of (color_x, color_y).
+            Pixels with no valid mapping have value -inf and should be
+            filtered by the caller before sampling the color image.
+        """
+        import ctypes
+        from pykinect2.PyKinectV2 import _ColorSpacePoint
+
+        DEPTH_W, DEPTH_H = 512, 424
+        L = DEPTH_W * DEPTH_H
+
+        depth_arr = np.ascontiguousarray(depth_frame, dtype=np.uint16).ravel()
+        depth_ptr = depth_arr.ctypes.data_as(ctypes.POINTER(ctypes.c_ushort))
+
+        csps = (_ColorSpacePoint * L)()
+        runtime._mapper.MapDepthFrameToColorSpace(
+            ctypes.c_uint(L), depth_ptr, ctypes.c_uint(L), csps
+        )
+
+        # _ColorSpacePoint is { float x; float y; } so the underlying buffer
+        # is 2 * L float32. Copy out so it survives the ctypes lifetime.
+        return np.frombuffer(csps, dtype=np.float32, count=L * 2).reshape(L, 2).copy()
 
     def _update_depth_debug_jpeg(
         self,
