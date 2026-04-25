@@ -151,6 +151,7 @@ async def processor_loop() -> None:
                             "edge_a_m": extra.get("edge_a_m", 0.0),
                             "edge_b_m": extra.get("edge_b_m", 0.0),
                             "ransac_inlier_pts": extra.get("ransac_inlier_pts", 0),
+                            "trim_info": extra.get("trim_info") or {},
                             "corners_3d": corners,
                         })
                     else:

@@ -968,7 +968,14 @@ function describeAutoCalResult(m) {
   var area = (typeof m.area_m2 === 'number') ? m.area_m2.toFixed(3) : '-';
   var ea = (typeof m.edge_a_m === 'number') ? m.edge_a_m.toFixed(3) : '-';
   var eb = (typeof m.edge_b_m === 'number') ? m.edge_b_m.toFixed(3) : '-';
-  return 'TV blob=' + px + 'px, area=' + area + 'm² (' + ea + '×' + eb + 'm)';
+  var s = 'TV blob=' + px + 'px, area=' + area + 'm² (' + ea + '×' + eb + 'm)';
+  var ti = m.trim_info || null;
+  if (ti && ti.trimmed) {
+    var tw = (typeof ti.trim_w_m === 'number') ? (ti.trim_w_m * 100).toFixed(1) : '-';
+    var th = (typeof ti.trim_h_m === 'number') ? (ti.trim_h_m * 100).toFixed(1) : '-';
+    s += ' · trimmed ' + tw + '×' + th + 'cm of co-planar fringe';
+  }
+  return s;
 }
 
 function handleBridgeMsg(m) {

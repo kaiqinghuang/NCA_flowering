@@ -415,6 +415,172 @@ def _ransac_plane(
     return refit
 
 
+def _trim_rect_by_density(
+    pts2d: np.ndarray,
+    box2d: np.ndarray,
+    bin_size_m: float = 0.01,
+    density_thresh_frac: float = 0.65,
+    min_run_m: float = 0.10,
+) -> Tuple[np.ndarray, dict]:
+    """Shrink a rotated bounding rect to its **dense core** along each axis.
+
+    ``cv2.minAreaRect`` returns the smallest rotated rectangle that
+    encloses every point. When the TV blob is contiguous with co-planar
+    structures that have visible gaps (e.g. parallel wood slats butting
+    up against the bezel), the rect over-shoots into them — even though
+    those extensions are mostly empty space punctuated by occupied stripes.
+
+    The TV's screen surface, however, is uniformly dense: along its long
+    axis every column has the full short-axis extent occupied. We exploit
+    that by:
+
+    1. Re-expressing each blob point in the rect's local axes
+       ``(u_rect, v_rect)`` (long axis vs short axis).
+    2. Binning to a 1 cm grid → 2D occupancy mask.
+    3. Computing per-column density along ``u_rect`` and per-row density
+       along ``v_rect`` (each as the fraction of the orthogonal axis that
+       is occupied).
+    4. Keeping the **longest contiguous run of bins** whose density is
+       ≥ ``density_thresh_frac × peak_density`` along each axis.
+    5. Mapping the trimmed bin range back to the rect-local coordinates,
+       and then to the parent (u_tmp, v_tmp) basis as 4 new corners.
+
+    A safety floor of ``min_run_m`` per axis keeps the algorithm from
+    over-trimming if the density signal is noisy.
+
+    Args:
+        pts2d:  (N, 2) blob points in the parent (u_tmp, v_tmp) basis.
+        box2d:  (4, 2) initial rect corners (CCW), same basis.
+        bin_size_m:           grid resolution in metres (1 cm default).
+        density_thresh_frac:  fraction of peak density that counts as
+                              "dense" (0.0 disables trimming).
+        min_run_m:            minimum allowed extent per axis after
+                              trimming (otherwise revert to the original
+                              rect bound on that axis).
+
+    Returns:
+        new_box2d: (4, 2) trimmed rect corners in the same basis,
+                   ordered (u_lo,v_lo) → (u_hi,v_lo) → (u_hi,v_hi) → (u_lo,v_hi).
+        info:      diagnostics (peak densities, kept extents, trim amounts).
+    """
+    if density_thresh_frac <= 0.0:
+        return box2d.copy(), {"trimmed": False, "reason": "disabled"}
+
+    e1 = box2d[1] - box2d[0]
+    e2 = box2d[2] - box2d[1]
+    e1_len = float(np.linalg.norm(e1))
+    e2_len = float(np.linalg.norm(e2))
+    if e1_len < 1e-9 or e2_len < 1e-9:
+        return box2d.copy(), {"trimmed": False, "reason": "degenerate rect"}
+
+    if e1_len >= e2_len:
+        long_axis = e1 / e1_len
+        short_axis = e2 / e2_len
+        long_half = e1_len / 2.0
+        short_half = e2_len / 2.0
+    else:
+        long_axis = e2 / e2_len
+        short_axis = e1 / e1_len
+        long_half = e2_len / 2.0
+        short_half = e1_len / 2.0
+    center = box2d.mean(axis=0)
+
+    rel = pts2d.astype(np.float64) - center
+    u_rect = rel @ long_axis
+    v_rect = rel @ short_axis
+
+    nu = max(8, int(np.ceil(2 * long_half / bin_size_m)) + 1)
+    nv = max(8, int(np.ceil(2 * short_half / bin_size_m)) + 1)
+    ui = np.clip(((u_rect + long_half) / bin_size_m).astype(np.int32), 0, nu - 1)
+    vi = np.clip(((v_rect + short_half) / bin_size_m).astype(np.int32), 0, nv - 1)
+    grid = np.zeros((nu, nv), dtype=bool)
+    grid[ui, vi] = True
+
+    u_density = grid.sum(axis=1).astype(np.float64) / float(max(1, nv))
+    v_density = grid.sum(axis=0).astype(np.float64) / float(max(1, nu))
+
+    def _longest_run_above(arr: np.ndarray, thresh: float) -> Tuple[int, int]:
+        n = int(len(arr))
+        if n == 0:
+            return 0, -1
+        above = arr >= thresh
+        best_s, best_e, best_len = 0, n - 1, 0
+        i = 0
+        while i < n:
+            if not above[i]:
+                i += 1
+                continue
+            j = i
+            while j < n and above[j]:
+                j += 1
+            run_len = j - i
+            if run_len > best_len:
+                best_len = run_len
+                best_s, best_e = i, j - 1
+            i = j
+        if best_len == 0:
+            return 0, n - 1
+        return best_s, best_e
+
+    peak_u = float(u_density.max()) if u_density.size else 0.0
+    peak_v = float(v_density.max()) if v_density.size else 0.0
+
+    if peak_u > 0.05:
+        u_s, u_e = _longest_run_above(u_density, peak_u * density_thresh_frac)
+    else:
+        u_s, u_e = 0, nu - 1
+    if peak_v > 0.05:
+        v_s, v_e = _longest_run_above(v_density, peak_v * density_thresh_frac)
+    else:
+        v_s, v_e = 0, nv - 1
+
+    u_lo = -long_half + u_s * bin_size_m
+    u_hi = -long_half + (u_e + 1) * bin_size_m
+    v_lo = -short_half + v_s * bin_size_m
+    v_hi = -short_half + (v_e + 1) * bin_size_m
+    u_lo = max(u_lo, -long_half)
+    u_hi = min(u_hi, +long_half)
+    v_lo = max(v_lo, -short_half)
+    v_hi = min(v_hi, +short_half)
+
+    reverted = []
+    if (u_hi - u_lo) < min_run_m:
+        u_lo, u_hi = -long_half, +long_half
+        reverted.append("u")
+    if (v_hi - v_lo) < min_run_m:
+        v_lo, v_hi = -short_half, +short_half
+        reverted.append("v")
+
+    new_box2d = np.array(
+        [
+            center + u_lo * long_axis + v_lo * short_axis,
+            center + u_hi * long_axis + v_lo * short_axis,
+            center + u_hi * long_axis + v_hi * short_axis,
+            center + u_lo * long_axis + v_hi * short_axis,
+        ],
+        dtype=np.float64,
+    )
+
+    rect_w = float(2 * long_half)
+    rect_h = float(2 * short_half)
+    kept_w = float(u_hi - u_lo)
+    kept_h = float(v_hi - v_lo)
+    info = {
+        "trimmed": (rect_w - kept_w) > 1e-3 or (rect_h - kept_h) > 1e-3,
+        "rect_w_m": rect_w,
+        "rect_h_m": rect_h,
+        "kept_w_m": kept_w,
+        "kept_h_m": kept_h,
+        "trim_w_m": rect_w - kept_w,
+        "trim_h_m": rect_h - kept_h,
+        "peak_u_density": peak_u,
+        "peak_v_density": peak_v,
+        "density_thresh_frac": float(density_thresh_frac),
+        "reverted_axes": reverted,
+    }
+    return new_box2d, info
+
+
 def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
     """Permute 4 (x, y, z) corners to canvas-order [TL, TR, BR, BL].
 
@@ -467,6 +633,9 @@ def auto_calibrate_tv_from_depth(
     z_min_m: float = 0.4,
     z_max_m: float = 4.5,
     morph_open_px: int = 3,
+    density_trim_frac: float = 0.65,
+    density_trim_bin_m: float = 0.01,
+    density_trim_min_run_m: float = 0.10,
 ) -> dict:
     """One-shot TV plane + 4-corner derivation from a depth-frame stack.
 
@@ -477,16 +646,21 @@ def auto_calibrate_tv_from_depth(
            thin connections to neighbouring co-planar wood strips.
         4. Largest connected component = TV blob.
         5. Build a temporary basis on the plane, project blob pixels to
-           plane (u, v), fit a min-area rotated rectangle → 4 in-plane
-           corners → reconstruct 3D → sort into TL/TR/BR/BL.
+           plane (u, v), fit a min-area rotated rectangle.
+        6. **Density-trim** that rect along its own axes — co-planar
+           extensions like wood slats with gaps between them have lower
+           per-row/per-column density than the solid TV screen, so we
+           keep only the rect's dense core.
+        7. Reconstruct 3D corners → sort into TL/TR/BR/BL.
 
     Returns a dict (always with ``ok``):
         ok, reason
         corners_3d        : list of 4 (x, y, z) tuples (TL, TR, BR, BL)
         plane             : (a, b, c, d) with origin-side positive
         n_blob_px         : int   pixel count of the chosen TV blob
-        area_m2           : float TV rectangle area in m²
+        area_m2           : float TV rectangle area in m² (after trim)
         ransac_inlier_pts : int   how many points fed to RANSAC
+        trim_info         : diagnostic dict from the density-trim stage
     """
     try:
         import cv2  # type: ignore
@@ -603,8 +777,18 @@ def auto_calibrate_tv_from_depth(
     rect = cv2.minAreaRect(pts2d.reshape(-1, 1, 2))
     box2d = cv2.boxPoints(rect)  # (4, 2) in same units as pts2d (meters)
 
+    # ---- 6. Density-trim the rect to exclude sparse co-planar extensions
+    #         (e.g. wood slats with gaps butting up against the TV bezel).
+    box2d_trimmed, trim_info = _trim_rect_by_density(
+        pts2d.astype(np.float64),
+        np.asarray(box2d, dtype=np.float64),
+        bin_size_m=float(density_trim_bin_m),
+        density_thresh_frac=float(density_trim_frac),
+        min_run_m=float(density_trim_min_run_m),
+    )
+
     raw_corners = []
-    for u_c, v_c in box2d:
+    for u_c, v_c in box2d_trimmed:
         c3 = origin_tmp + float(u_c) * u_tmp + float(v_c) * v_tmp
         raw_corners.append(c3)
     raw_corners_arr = np.stack(raw_corners, axis=0)  # (4, 3)
@@ -624,4 +808,5 @@ def auto_calibrate_tv_from_depth(
         "ransac_inlier_pts": int(ransac_pts.shape[0]),
         "edge_a_m": edge_a,
         "edge_b_m": edge_b,
+        "trim_info": trim_info,
     }

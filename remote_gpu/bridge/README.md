@@ -90,17 +90,27 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
      bridges to neighbouring co-planar wood strips,
    * picks the **largest connected component** as the TV blob,
    * wraps a `cv2.minAreaRect` around the blob's in-plane (u, v)
-     points, reconstructing 4 corners in 3D,
-   * sorts those corners into TL/TR/BR/BL by their (X, Z): front
-     (smaller Z) = top, right (larger X) = right,
+     points,
+   * **density-trims** that rect along its long & short axes — co-planar
+     fringes like parallel wood slats with gaps between them have
+     visibly lower per-row/per-column occupancy than the solid TV
+     screen, so the trim shrinks the rect until each axis only contains
+     the dense core (`BRIDGE_AUTOFIT_TRIM_FRAC` controls the cutoff;
+     `BRIDGE_AUTOFIT_TRIM_MIN_M` is a per-axis safety floor).
+   * Reconstructs 4 trimmed corners in 3D, sorts into TL/TR/BR/BL by
+     (X, Z): front (smaller Z) = top, right (larger X) = right,
    * SVD-refits the plane on the 4 sorted corners and solves the
      homography to the canvas. Result saved to `tv_calibration.json`.
 
-If the wood strips around the TV are co-planar *and* contiguous, they
-will end up inside the blob and the rectangle will be slightly larger
-than the screen. Either physically separate them, increase the
-morph-open size (`BRIDGE_AUTOFIT_OPEN_PX`), or reduce the on-plane
-tolerance (`BRIDGE_AUTOFIT_EPS_M`).
+If the wood strips around the TV are co-planar *and* contiguous, the
+density trim should clip them off automatically — the status bar will
+show "trimmed N×M cm of co-planar fringe". If trimming is too
+aggressive (eats into the TV), raise `BRIDGE_AUTOFIT_TRIM_FRAC`
+(e.g. 0.55 → 0.75 keeps less); if it is not aggressive enough (slats
+remain), lower it (e.g. 0.65 → 0.50). You can also bump the morph-open
+kernel (`BRIDGE_AUTOFIT_OPEN_PX=5`) or tighten the on-plane tolerance
+(`BRIDGE_AUTOFIT_EPS_M=0.010`) to physically detach more of the slats
+from the TV blob upstream of the trim.
 
 **Reset TV Calibration** deletes the saved file. Re-run Auto-Calibrate
 any time the camera moves.
@@ -129,11 +139,15 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_DEPTH_BAND_MIN_M` | `0.02` | near edge of the interaction box (m above plane) |
 | `BRIDGE_DEPTH_BAND_MAX_M` | `0.45` | far edge of the interaction box (m above plane) |
 | `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
+| `BRIDGE_AUTOFIT_EPS_M` | `0.015` | on-plane tolerance during auto-calibration |
+| `BRIDGE_AUTOFIT_OPEN_PX` | `3` | morph-open kernel (px) on the on-plane mask |
+| `BRIDGE_AUTOFIT_TRIM_FRAC` | `0.65` | density-trim cutoff as fraction of peak (0 disables trim) |
+| `BRIDGE_AUTOFIT_TRIM_MIN_M` | `0.10` | per-axis minimum kept extent before trim is reverted (m) |
+| `BRIDGE_AUTOFIT_TRIM_BIN_M` | `0.01` | density-grid bin size (m) |
 
-Auto-calibration parameters are currently set in code defaults
+Other auto-calibration parameters are currently set in code defaults
 (`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,
-on-plane epsilon `1.5 cm`, morph-open kernel `3×3`, min blob `1500 px`,
-plane fit point limit `12 000`. Adjust by editing
+min blob `1500 px`, plane fit point limit `12 000`. Adjust by editing
 `bridge/depth_processing.py` if your scene needs it.
 
 ## Protocol (for reference)

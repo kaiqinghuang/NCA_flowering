@@ -317,7 +317,21 @@ class KinectDepthSource:
                 return
 
             try:
-                result = auto_calibrate_tv_from_depth(buf)
+                # Env-var overrides let the operator tune behaviour without
+                # touching code (matches knobs documented in README.md).
+                eps_m = float(os.environ.get("BRIDGE_AUTOFIT_EPS_M", "0.015"))
+                open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
+                trim_frac = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_FRAC", "0.65"))
+                trim_min_m = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_MIN_M", "0.10"))
+                trim_bin_m = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_BIN_M", "0.01"))
+                result = auto_calibrate_tv_from_depth(
+                    buf,
+                    on_plane_eps_m=eps_m,
+                    morph_open_px=open_px,
+                    density_trim_frac=trim_frac,
+                    density_trim_bin_m=trim_bin_m,
+                    density_trim_min_run_m=trim_min_m,
+                )
             except Exception as e:  # noqa: BLE001
                 self._push_msg({
                     "op": "tv_autocalib_failed",
@@ -332,10 +346,20 @@ class KinectDepthSource:
                 })
                 return
 
+            trim_info = result.get("trim_info") or {}
+            trim_log = ""
+            if trim_info.get("trimmed"):
+                trim_log = (
+                    f"  trim={trim_info.get('trim_w_m', 0.0) * 100:.1f}cm×"
+                    f"{trim_info.get('trim_h_m', 0.0) * 100:.1f}cm"
+                    f"  kept={trim_info.get('kept_w_m', 0.0):.3f}×"
+                    f"{trim_info.get('kept_h_m', 0.0):.3f}m"
+                )
             print(
                 f"[kinect-depth] autocal: blob={result['n_blob_px']}px  "
                 f"area={result['area_m2']:.3f}m²  "
                 f"edges={result['edge_a_m']:.3f}×{result['edge_b_m']:.3f}m"
+                f"{trim_log}"
             )
             self._push_msg({
                 "op": "tv_autocalib_corners_ready",
@@ -346,6 +370,7 @@ class KinectDepthSource:
                 "edge_a_m": float(result["edge_a_m"]),
                 "edge_b_m": float(result["edge_b_m"]),
                 "ransac_inlier_pts": int(result.get("ransac_inlier_pts", 0)),
+                "trim_info": trim_info,
             })
         finally:
             self._autocal_in_progress = False
