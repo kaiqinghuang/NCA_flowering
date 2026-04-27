@@ -611,7 +611,7 @@ def auto_calibrate_tv_from_depth(
     morph_open_px: int = 3,
     color_max_v: float = 90.0,
     color_close_px: int = 3,
-    trim_pct: float = 1.5,
+    trim_pct: float = 0.5,
 ) -> dict:
     """One-shot TV plane + 4-corner derivation, depth + colour fused.
 
