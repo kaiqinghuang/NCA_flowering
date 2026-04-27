@@ -7,12 +7,13 @@ NCA browser client. The runtime is **depth-first**:
   height, slightly tilted toward the screen.
 * TV calibration is **one-click automatic**: capture ~1.5 s of depth
   frames, RANSAC-fit the dominant 3D plane, isolate the largest
-  co-planar blob (= the TV screen), derive 4 corners — the rear two
-  (BR/BL) from a min-area bounding rectangle, the front two (TL/TR)
-  from the blob's own top-K front-diagonal extremes so they always
-  sit on the visible front edge — and assign them to canvas
-  TL/TR/BR/BL by their (X, Z) in camera space (front=top, right=right).
-  The result is saved to `tv_calibration.json`.
+  co-planar blob (= the TV screen), then place a real rectangle
+  **inscribed** in that blob (largest one that fits, with a small
+  noise-tolerance so it spans across depth-dropout holes/jagged
+  edges instead of shrinking to fit every tiny gap), and assign its
+  4 corners to canvas TL/TR/BR/BL by their (X, Z) in camera space
+  (front=top, right=right). The result is saved to
+  `tv_calibration.json`.
 * At runtime, the bridge ignores the SDK skeleton: the depth frame is
   filtered by *(inside the calibrated TV polygon) ∧ (signed distance to
   plane within `[0.02, 0.45]`m)*, and the **fingertip = pixel closest to
@@ -103,21 +104,26 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
      this single test cleanly removes them.
    * Closes pinholes (`BRIDGE_AUTOFIT_COLOR_CLOSE_PX`) and takes the
      largest CC again as the final TV mask,
-   * Wraps a `cv2.minAreaRect` around the colour-refined blob's
-     in-plane (u, v) points → 4 bounding-box corners in 3D,
-   * Sorts those into TL/TR/BR/BL by (X, Z): front (smaller Z) = top,
-     right (larger X) = right,
-   * **Refines TL/TR** (the front pair) with a side-anchored two-step:
-     first pick the 50 blob pixels with the smallest / largest
-     `proj_right` (the dense LEFT and RIGHT edge clusters of the blob),
-     then within each side cluster average the 10 most-front pixels.
-     Anchoring on the side first guarantees TL/TR sit at the same X as
-     BR/BL — i.e. the resulting quad keeps the actual TV's width — and
-     the two side clusters are disjoint by construction so TL/TR can't
-     collapse. BR/BL (already correct from the bounding rect) are left
-     untouched,
-   * SVD-refits the plane on the 4 (now possibly slightly trapezoidal)
-     corners and solves the homography to the canvas. Result saved to
+   * Uses `cv2.minAreaRect` ONLY to pick a stable orientation
+     `(ru, rv)` for the blob (the bounding box itself is *not* used
+     for the corners — its edges always overshoot a noisy blob),
+   * **Finds the largest rectangle (mostly) inscribed in the blob**
+     along that orientation: rasterise the blob in the rect-aligned
+     frame at `BRIDGE_AUTOFIT_INSCRIBE_GRID_M` (default `0.007` m =
+     7 mm/cell), dilate by `BRIDGE_AUTOFIT_INSCRIBE_TOLERANCE_M`
+     (default `0.025` m = 25 mm) so the rect is allowed to span
+     across small black-noise holes / jagged edges, then run the
+     standard histogram-stack LIR algorithm for the largest
+     all-ones axis-aligned rectangle in the dilated grid → 4
+     corners in 3D. With tolerance = 0 every corner sits strictly
+     inside the on-plane blob; raising it lets the rect grow toward
+     the actual TV size (forgiving holes from depth dropout / TV
+     content during calibration) at the cost of possibly extending
+     up to that distance past the blob's true outer boundary,
+   * Sorts the 4 LIR corners into TL/TR/BR/BL by (X, Z): front
+     (smaller Z) = top, right (larger X) = right,
+   * SVD-refits the plane on the 4 corners and solves the
+     homography to the canvas. Result saved to
      `tv_calibration.json`.
 
 The status bar will show e.g. `color: 8214→5103px (removed 37.9% as
@@ -142,8 +148,8 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | color | meaning |
 |-------|---------|
 | TURBO pseudo-color | raw depth |
-| **magenta polygon outline** | the 4 auto-derived corners projected to the depth image — should hug the actual TV |
-| **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon |
+| **magenta polygon outline** | the 4 inscribed-rect corners projected to the depth image — sits *inside* the magenta fill (intentionally — it's an inscribed rect) |
+| **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane (NOT clipped by the polygon — this shows the *true* extent of the calibrated TV plane) |
 | **light green** | the interaction box: pixels in the plane-normal slab `[BRIDGE_DEPTH_BAND_MIN_M, BRIDGE_DEPTH_BAND_MAX_M]` *and* inside the polygon |
 | **yellow circle** | live SDK `HandTipRight` (visual reference only — no longer used for calibration) |
 | **white cross + ring** | the depth-derived fingertip used at runtime (closest-to-plane median of the K nearest pixels) |
@@ -164,6 +170,8 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
 | `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | max brightness (max(B,G,R), 0–255) to count as TV-black |
 | `BRIDGE_AUTOFIT_COLOR_CLOSE_PX` | `3` | morph-close kernel (px) on the colour-refined mask |
+| `BRIDGE_AUTOFIT_INSCRIBE_TOLERANCE_M` | `0.025` | how much "black noise" the inscribed rect may contain — ↑ to grow the rect across bigger holes (cost: rect may extend that far past the true TV edge); ↓ for stricter inscribed fit |
+| `BRIDGE_AUTOFIT_INSCRIBE_GRID_M` | `0.007` | rasterisation step (m/cell) for the LIR search; smaller = more accurate corners, slower |
 
 Other auto-calibration parameters are currently set in code defaults
 (`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,
