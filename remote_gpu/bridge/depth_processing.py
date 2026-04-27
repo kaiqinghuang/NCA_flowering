@@ -230,10 +230,12 @@ def render_depth_debug_bgr(
 ) -> np.ndarray:
     """BGR debug image overlay.
 
-    * **Magenta** = pixels within ``surface_eps_m`` of the fitted plane AND
-      inside the calibrated TV polygon → real TV surface confirmation.
-    * **Light green** = interaction box (slab ``[box_near, box_far]`` along
-      the plane normal, inside the polygon) → where hand will be detected.
+    * **Magenta fill** = pixels within ``surface_eps_m`` of the fitted plane
+      AND inside the calibrated TV polygon → real TV surface confirmation.
+    * **Orange outline** = interaction-box contour (slab ``[box_near,
+      box_far]`` along the plane normal, inside the polygon) → where the
+      hand will be detected. We draw the outline rather than filling the
+      interior so the fingertip and depth pseudocolor stay readable.
     * **Magenta polygon outline** = the calibrated 4-corner TV rectangle.
     * **Yellow circle** = SDK HandTipRight (when visible, useful during
       calibration).
@@ -269,10 +271,18 @@ def render_depth_debug_bgr(
         if in_box is not None and in_box.shape == bgr.shape[:2]:
             n_box = int(np.count_nonzero(in_box))
             if n_box > 0:
-                green = np.array([0.0, 255.0, 120.0], dtype=np.float32)  # BGR light green
-                bf = bgr.astype(np.float32)
-                m = in_box[:, :, None]
-                bgr = np.where(m, bf * 0.55 + green * 0.45, bf).astype(np.uint8)
+                # Orange solid outline (BGR (0, 140, 255)). We outline the
+                # interaction-box mask instead of tinting the interior so
+                # the fingertip and underlying depth stay readable.
+                contours, _ = cv2.findContours(
+                    in_box.astype(np.uint8),
+                    cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE,
+                )
+                if contours:
+                    cv2.drawContours(
+                        bgr, contours, -1, (0, 140, 255), 2, cv2.LINE_AA,
+                    )
 
         # Outline: project the 4 captured 3D corners to depth pixels
         try:
@@ -344,7 +354,7 @@ def render_depth_debug_bgr(
     if plane_ready:
         hint = (
             f"magenta=TV surface (within {int(surface_eps_m * 1000)}mm)  "
-            f"green={int(box_near_m * 1000)}-{int(box_far_m * 1000)}mm interaction box"
+            f"orange={int(box_near_m * 1000)}-{int(box_far_m * 1000)}mm interaction box"
         )
     else:
         hint = "TV plane not calibrated — run TV calibration first"
