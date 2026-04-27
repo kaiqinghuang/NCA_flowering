@@ -365,7 +365,7 @@ class KinectDepthSource:
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
                 color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "90"))
                 color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
-                trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "1.5"))
+                trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "0.5"))
                 result = auto_calibrate_tv_from_depth(
                     buf,
                     color_bgr=last_color_bgr if color_enable else None,
