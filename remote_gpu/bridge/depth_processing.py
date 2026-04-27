@@ -611,7 +611,9 @@ def auto_calibrate_tv_from_depth(
     morph_open_px: int = 3,
     color_max_v: float = 90.0,
     color_close_px: int = 3,
-    trim_pct: float = 0.5,
+    trim_pct: float = 0,
+    trim_pct_front: Optional[float] = None,
+    trim_pct_back: Optional[float] = None,
 ) -> dict:
     """One-shot TV plane + 4-corner derivation, depth + colour fused.
 
@@ -631,20 +633,30 @@ def auto_calibrate_tv_from_depth(
            or the filter wipes everything.)
         6. Project the refined blob to the plane (u, v), then derive 4
            corners via **PCA + percentile trim** instead of
-           ``cv2.minAreaRect``. PCA finds the TV's long/short axes; we
-           take the ``[trim_pct, 100 − trim_pct]`` percentile of the
-           projection along each axis as the rectangle bounds. This is
-           robust to a small fraction of co-planar outliers that survive
-           the colour pass (e.g. bezel transition pixels at the front
-           edge of the TV) — those would otherwise drag a strict min-area
-           rect outward.
+           ``cv2.minAreaRect``. PCA finds the TV's long / short axes; we
+           detect which one is the front-back axis (largest |Z| component
+           in camera space) and apply **asymmetric** trim there:
+           ``trim_pct_front`` on the side facing the camera (smaller Z)
+           and ``trim_pct_back`` on the side away from it. The other axis
+           (left-right) uses the symmetric ``trim_pct``. This rejects the
+           small population of bezel / transition pixels that survive the
+           colour pass — typically concentrated on the front edge — while
+           leaving the back edge untouched if you set
+           ``trim_pct_back = 0``.
         7. Reconstruct 3D corners → sort into TL/TR/BR/BL.
 
     Args:
-        trim_pct: percentage of points to discard at *each* end of *each*
-                  PCA axis when fitting the rectangle. ``1.5`` keeps the
-                  central 97% of points along each axis. Set to ``0`` to
-                  fall back to a strict min/max bounding box.
+        trim_pct: percentage of points to discard at each end of the
+                  left-right PCA axis. Also the default for front/back
+                  if ``trim_pct_front`` / ``trim_pct_back`` are ``None``.
+                  ``0`` = strict min/max (no trim).
+        trim_pct_front: per-side trim on the front edge of the TV
+                  (closer to the camera, smaller Z). ``None`` ⇒ inherits
+                  ``trim_pct``.
+        trim_pct_back:  per-side trim on the back edge of the TV (farther
+                  from the camera, larger Z). ``None`` ⇒ inherits
+                  ``trim_pct``. Set to ``0`` to keep the back edge tight
+                  to the actual blob extent.
 
     Returns a dict (always with ``ok``):
         ok, reason
@@ -655,7 +667,7 @@ def auto_calibrate_tv_from_depth(
         area_m2           : float TV rectangle area in m²
         ransac_inlier_pts : int   how many points fed to RANSAC
         color_info        : diagnostic dict from the colour-refine stage
-        trim_pct_used     : float trim percentage actually applied
+        trim_used         : dict  {sides, front, back} percentages applied
     """
     try:
         import cv2  # type: ignore
@@ -824,17 +836,47 @@ def auto_calibrate_tv_from_depth(
     proj_e1 = centered @ e1                  # (N,) projection on long axis
     proj_e2 = centered @ e2                  # (N,) projection on short axis
 
-    # Percentile bounds on each axis: discard the most extreme `trim_pct`%
-    # of points at each end. This rejects the small population of bezel /
-    # transition pixels that survive the colour pass and would otherwise
-    # drag a strict bounding box outward (especially on the front edge).
-    trim = max(0.0, min(15.0, float(trim_pct)))
-    if trim > 0.0:
-        e1_lo, e1_hi = np.percentile(proj_e1, [trim, 100.0 - trim])
-        e2_lo, e2_hi = np.percentile(proj_e2, [trim, 100.0 - trim])
+    # Resolve the three trim values. Sides is symmetric on the left-right
+    # axis; front/back are applied asymmetrically on the front-back axis.
+    # `None` means "inherit `trim_pct`".
+    trim_sides = max(0.0, min(15.0, float(trim_pct)))
+    trim_front = max(0.0, min(15.0,
+        float(trim_pct_front if trim_pct_front is not None else trim_pct)))
+    trim_back = max(0.0, min(15.0,
+        float(trim_pct_back if trim_pct_back is not None else trim_pct)))
+
+    def _bounds(proj: np.ndarray, lo_pct: float, hi_pct: float) -> Tuple[float, float]:
+        """Cut `lo_pct`% off the low end and `hi_pct`% off the high end."""
+        lo = float(np.percentile(proj, lo_pct)) if lo_pct > 0.0 else float(proj.min())
+        hi = float(np.percentile(proj, 100.0 - hi_pct)) if hi_pct > 0.0 else float(proj.max())
+        return lo, hi
+
+    # Identify which PCA axis is "front-back" by its camera-Z component.
+    # u_tmp[2], v_tmp[2] are the Z components of the in-plane basis vectors;
+    # the PCA axis whose 3D direction has the larger |Z| is the front-back
+    # axis (the other is left-right). Sign tells us which end is the front
+    # (smaller Z) vs back (larger Z) so we can route the front/back trims.
+    e1_z = float(e1[0] * u_tmp[2] + e1[1] * v_tmp[2])
+    e2_z = float(e2[0] * u_tmp[2] + e2[1] * v_tmp[2])
+
+    if abs(e1_z) >= abs(e2_z):
+        # e1 = front-back axis, e2 = sides axis.
+        if e1_z > 0:
+            # +e1 increases Z → e1_hi side is BACK, e1_lo side is FRONT.
+            e1_lo, e1_hi = _bounds(proj_e1, trim_front, trim_back)
+        else:
+            # +e1 decreases Z → e1_hi side is FRONT, e1_lo side is BACK.
+            e1_lo, e1_hi = _bounds(proj_e1, trim_back, trim_front)
+        e2_lo, e2_hi = _bounds(proj_e2, trim_sides, trim_sides)
+        fb_axis = "long"
     else:
-        e1_lo, e1_hi = float(proj_e1.min()), float(proj_e1.max())
-        e2_lo, e2_hi = float(proj_e2.min()), float(proj_e2.max())
+        # e2 = front-back axis, e1 = sides axis.
+        if e2_z > 0:
+            e2_lo, e2_hi = _bounds(proj_e2, trim_front, trim_back)
+        else:
+            e2_lo, e2_hi = _bounds(proj_e2, trim_back, trim_front)
+        e1_lo, e1_hi = _bounds(proj_e1, trim_sides, trim_sides)
+        fb_axis = "short"
 
     edge_a = float(e1_hi - e1_lo)
     edge_b = float(e2_hi - e2_lo)
@@ -874,5 +916,10 @@ def auto_calibrate_tv_from_depth(
         "edge_a_m": edge_a,
         "edge_b_m": edge_b,
         "color_info": color_info,
-        "trim_pct_used": float(trim),
+        "trim_used": {
+            "sides": trim_sides,
+            "front": trim_front,
+            "back": trim_back,
+            "fb_axis": fb_axis,
+        },
     }

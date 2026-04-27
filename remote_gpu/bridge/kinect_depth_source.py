@@ -365,7 +365,15 @@ class KinectDepthSource:
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
                 color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "90"))
                 color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
-                trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "0.5"))
+                # Sides (left/right) = 0, back = 0, front = 1.5%.
+                # Only the front edge of the TV picks up bezel / transition
+                # pixels that survive the colour pass; the other three sides
+                # are clean so we leave them tight to the blob.
+                trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "0"))
+                tf_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_FRONT_PCT", "1.5")
+                tb_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BACK_PCT", "0")
+                trim_front = float(tf_env) if tf_env != "" else None
+                trim_back = float(tb_env) if tb_env != "" else None
                 result = auto_calibrate_tv_from_depth(
                     buf,
                     color_bgr=last_color_bgr if color_enable else None,
@@ -375,6 +383,8 @@ class KinectDepthSource:
                     color_max_v=color_max_v,
                     color_close_px=color_close_px,
                     trim_pct=trim_pct,
+                    trim_pct_front=trim_front,
+                    trim_pct_back=trim_back,
                 )
             except Exception as e:  # noqa: BLE001
                 self._push_msg({
@@ -400,11 +410,18 @@ class KinectDepthSource:
                 )
             elif color_info:
                 color_log = f"  color: skipped ({color_info.get('reason', '?')})"
+            tu = result.get("trim_used") or {}
+            trim_log = (
+                f"trim=sides{tu.get('sides', 0):.1f}/"
+                f"front{tu.get('front', 0):.1f}/"
+                f"back{tu.get('back', 0):.1f}% "
+                f"({tu.get('fb_axis', '?')} axis = front-back)"
+            )
             print(
                 f"[kinect-depth] autocal: blob={result['n_blob_px']}px  "
                 f"area={result['area_m2']:.3f}m²  "
                 f"edges={result['edge_a_m']:.3f}×{result['edge_b_m']:.3f}m  "
-                f"trim={result.get('trim_pct_used', 0.0):.1f}%"
+                f"{trim_log}"
                 f"{color_log}"
             )
             self._push_msg({

@@ -103,14 +103,17 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
      largest CC again as the final TV mask,
    * Projects the colour-refined blob to the plane (u, v) and runs a
      **PCA + percentile** rectangle fit: PCA finds the TV's long /
-     short edges, then we take the
-     `[BRIDGE_AUTOFIT_TRIM_PCT, 100 − BRIDGE_AUTOFIT_TRIM_PCT]`
-     percentile of the per-axis projections as the rectangle bounds.
-     This rejects the small population of bezel / transition pixels
-     that survive the colour pass and would otherwise drag a strict
-     `cv2.minAreaRect` outward (typically visible as the front edge
-     pushing past the actual TV in the debug overlay). Set
-     `BRIDGE_AUTOFIT_TRIM_PCT=0` to fall back to a strict bounding box.
+     short edges, then we identify the front-back axis (the PCA axis
+     with the largest |Z| component in camera space) and apply
+     **asymmetric** trim there:
+     `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` on the side facing the camera
+     (smaller Z) and `BRIDGE_AUTOFIT_TRIM_BACK_PCT` on the side away
+     from it, while the left-right axis uses the symmetric
+     `BRIDGE_AUTOFIT_TRIM_PCT`. This rejects bezel / transition pixels
+     that survive the colour pass — typically concentrated on the front
+     edge — without pulling the (usually clean) back edge inward. Set
+     `BRIDGE_AUTOFIT_TRIM_PCT=0` (and leave the front/back overrides
+     unset) to fall back to a strict bounding box.
    * Sorts the 4 corners into TL/TR/BR/BL by (X, Z): front (smaller Z)
      = top, right (larger X) = right,
    * SVD-refits the plane on the 4 sorted corners and solves the
@@ -129,15 +132,19 @@ bright)`, telling you exactly how much of the depth blob was wood/bezel.
   `BRIDGE_AUTOFIT_COLOR_ENABLE=0`.
 
 **Tuning the rectangle fit:**
-* If one of the 4 corners (typically TL/TR — the front edge of the TV
-  closest to the camera, where bezel transition pixels survive the
-  colour pass) is **outside** the actual TV in the debug overlay →
-  raise `BRIDGE_AUTOFIT_TRIM_PCT` (e.g. `1.5 → 3.0` or `5.0`). Each unit
-  trims one extra percent of the most-extreme PCA-projected points at
-  every end of every axis.
-* If the rectangle is **smaller** than the actual TV (corners eating
-  into the screen) → lower it (`1.5 → 0.5`) or set `0` to use a strict
-  bounding box.
+* The PCA fit applies trim **independently** on each side of the rectangle.
+  `BRIDGE_AUTOFIT_TRIM_PCT` is the symmetric default; the front-back axis
+  honours `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` and `BRIDGE_AUTOFIT_TRIM_BACK_PCT`
+  if those are set.
+* **TL/TR drifting in front of the TV** (most common case — bezel transition
+  pixels survive the colour pass on the edge closest to the camera):
+  raise `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` (e.g. `1.5`). Each unit trims one
+  extra percent of the most-extreme PCA-projected points on the front side.
+* **BL/BR drifting outside the TV**: raise `BRIDGE_AUTOFIT_TRIM_BACK_PCT`.
+* **BL/BR shrinking inward** (back edge already clean from the colour pass,
+  but trim is eating it): set `BRIDGE_AUTOFIT_TRIM_BACK_PCT=0`.
+* **Whole rectangle eating into the TV**: lower `BRIDGE_AUTOFIT_TRIM_PCT`
+  or set `0` to use a strict bounding box.
 
 **Reset TV Calibration** deletes the saved file. Re-run Auto-Calibrate
 any time the camera moves.
@@ -171,7 +178,9 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
 | `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | max brightness (max(B,G,R), 0–255) to count as TV-black |
 | `BRIDGE_AUTOFIT_COLOR_CLOSE_PX` | `3` | morph-close kernel (px) on the colour-refined mask |
-| `BRIDGE_AUTOFIT_TRIM_PCT` | `1.5` | per-side percentile trim on the PCA rect fit. Higher = tighter rect (rejects more outliers); `0` = strict min/max bounding box |
+| `BRIDGE_AUTOFIT_TRIM_PCT` | `1.5` | per-side percentile trim on the **left-right** axis of the PCA rect fit. Also the default for front/back when their overrides are unset. `0` = strict min/max bounding box |
+| `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` | _(inherits TRIM_PCT)_ | trim on the **front** edge of the TV (closer to the camera). Raise to pull TL/TR inward when bezel pixels leak past the colour filter |
+| `BRIDGE_AUTOFIT_TRIM_BACK_PCT` | _(inherits TRIM_PCT)_ | trim on the **back** edge of the TV (farther from the camera). Set to `0` to keep BL/BR pinned to the actual blob extent |
 
 Other auto-calibration parameters are currently set in code defaults
 (`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,
