@@ -107,11 +107,15 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
      in-plane (u, v) points → 4 bounding-box corners in 3D,
    * Sorts those into TL/TR/BR/BL by (X, Z): front (smaller Z) = top,
      right (larger X) = right,
-   * **Refines TL/TR** (the front pair) by averaging the top-50 blob
-     pixels furthest in the front-and-left / front-and-right diagonal
-     directions — pulls the front corners off the bounding-rect's
-     overshoot back onto the blob's actual visible front edge while
-     leaving BR/BL (which already sit on the dense back edge) untouched,
+   * **Refines TL/TR** (the front pair) with a side-anchored two-step:
+     first pick the 50 blob pixels with the smallest / largest
+     `proj_right` (the dense LEFT and RIGHT edge clusters of the blob),
+     then within each side cluster average the 10 most-front pixels.
+     Anchoring on the side first guarantees TL/TR sit at the same X as
+     BR/BL — i.e. the resulting quad keeps the actual TV's width — and
+     the two side clusters are disjoint by construction so TL/TR can't
+     collapse. BR/BL (already correct from the bounding rect) are left
+     untouched,
    * SVD-refits the plane on the 4 (now possibly slightly trapezoidal)
      corners and solves the homography to the canvas. Result saved to
      `tv_calibration.json`.

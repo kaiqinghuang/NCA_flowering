@@ -815,24 +815,35 @@ def auto_calibrate_tv_from_depth(
     # because the back is dense and well-defined, so we leave them alone
     # and only re-derive TL/TR from the blob itself.
     #
-    # Strategy (two-step, decoupled): project the FULL (un-subsampled) blob
-    # to the (u, v) plane, define the back→front axis from the BR-BL
-    # midpoint to the TR-TL midpoint (reliable because BR/BL are accurate),
-    # and the perpendicular left→right axis. Then:
-    #   1. Pick the K_front most-front blob pixels (the dense visible
-    #      front-edge cluster) — single 2 % pool, large enough that any
-    #      front-centre "tongue"/spike no longer dominates.
-    #   2. Inside that pool, pick the K leftmost and K rightmost as TL_new
-    #      and TR_new. These two sub-sets are DISJOINT by construction so
-    #      TL_new and TR_new can never collapse onto the same 3D point.
-    # A final sanity check (TL_new vs TR_new ≥ 5 cm apart in 3D) falls
-    # back to the original min-area-rect corners if the geometry is too
-    # degenerate to refine — guarantees we never feed _finalize a
-    # zero-length TL→TR direction.
-    refine_K = 50
+    # Strategy (two-step, side-anchored): project the FULL (un-subsampled)
+    # blob to the (u, v) plane, define back→front and left→right axes from
+    # the labelled corners (the back→front direction is reliable because
+    # BR/BL are accurate). Then:
+    #   1. Pick the K_side blob pixels with the smallest `proj_right`
+    #      (= the dense LEFT EDGE cluster) and, separately, the K_side
+    #      pixels with the largest `proj_right` (RIGHT EDGE cluster).
+    #      These pools are tightly anchored at the blob's leftmost /
+    #      rightmost extremes — same X as BR/BL, give or take ~1 cm.
+    #   2. Inside each side pool, take the K_front_inner most-front
+    #      (largest `proj_front`) pixels and average → TL_new / TR_new.
+    #
+    # This ordering matters: anchoring on `proj_right` first guarantees
+    # TL_new's X ≈ BL's X (and TR_new's X ≈ BR's X), so the resulting
+    # quad has the same width as BR-BL — i.e. it stays a real-world
+    # rectangle, just like the actual TV. Doing it the other way round
+    # (front cluster first, leftmost within) pulls the corners several
+    # centimetres inward because the leftmost K of the narrow front pool
+    # spans a meaningful fraction of the blob width.
+    #
+    # The two side pools are disjoint by construction (K_side ≪ blob
+    # width in pixels) so TL_new and TR_new can never collapse. A final
+    # 5 cm sanity check falls back to the bounding-rect corners if the
+    # geometry is too degenerate to refine.
+    K_side = 50
+    K_front_inner = 10
     pts2d_full = np.stack([u_coords, v_coords], axis=1)
     n_pts = int(pts2d_full.shape[0])
-    if n_pts >= 4 * refine_K:  # need enough pixels to split front pool 50/50
+    if n_pts >= 4 * K_side:  # need enough pixels for disjoint left/right pools
         TL_3d, TR_3d, BR_3d, BL_3d = sorted_corners
 
         def _to_uv(c3d: tuple) -> np.ndarray:
@@ -862,18 +873,20 @@ def auto_calibrate_tv_from_depth(
             proj_front = rel_pts @ front_axis
             proj_right = rel_pts @ right_axis
 
-            # Step 1: front cluster = top ~2% most-front pixels (≥ 2*K).
-            K_front = int(max(2 * refine_K, min(n_pts - 1, n_pts // 50)))
-            front_idx = np.argpartition(-proj_front, K_front - 1)[:K_front]
-            cluster_uv = pts2d_full[front_idx]
-            cluster_right = proj_right[front_idx]
+            # Step 1: side pools = K_side leftmost / rightmost pixels by proj_right.
+            side_left_idx = np.argpartition(proj_right, K_side - 1)[:K_side]
+            side_right_idx = np.argpartition(-proj_right, K_side - 1)[:K_side]
+            side_left_pts = pts2d_full[side_left_idx]
+            side_right_pts = pts2d_full[side_right_idx]
+            side_left_front = proj_front[side_left_idx]
+            side_right_front = proj_front[side_right_idx]
 
-            # Step 2: within the front cluster, K leftmost = TL, K rightmost = TR.
-            K = int(min(refine_K, K_front // 2))
-            tl_local = np.argpartition(cluster_right, K - 1)[:K]
-            tr_local = np.argpartition(-cluster_right, K - 1)[:K]
-            TL_new_uv = cluster_uv[tl_local].mean(axis=0)
-            TR_new_uv = cluster_uv[tr_local].mean(axis=0)
+            # Step 2: within each side pool, K_front_inner most-front → mean.
+            K_inner = int(min(K_front_inner, K_side // 2))
+            left_top_idx = np.argpartition(-side_left_front, K_inner - 1)[:K_inner]
+            right_top_idx = np.argpartition(-side_right_front, K_inner - 1)[:K_inner]
+            TL_new_uv = side_left_pts[left_top_idx].mean(axis=0)
+            TR_new_uv = side_right_pts[right_top_idx].mean(axis=0)
 
             TL_new_3d = (
                 origin_tmp
