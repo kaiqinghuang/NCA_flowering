@@ -365,12 +365,6 @@ class KinectDepthSource:
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
                 color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "90"))
                 color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
-                inscribe_tol_m = float(
-                    os.environ.get("BRIDGE_AUTOFIT_INSCRIBE_TOLERANCE_M", "0.025")
-                )
-                inscribe_grid_m = float(
-                    os.environ.get("BRIDGE_AUTOFIT_INSCRIBE_GRID_M", "0.007")
-                )
                 result = auto_calibrate_tv_from_depth(
                     buf,
                     color_bgr=last_color_bgr if color_enable else None,
@@ -379,8 +373,6 @@ class KinectDepthSource:
                     morph_open_px=open_px,
                     color_max_v=color_max_v,
                     color_close_px=color_close_px,
-                    inscribe_tolerance_m=inscribe_tol_m,
-                    inscribe_grid_step_m=inscribe_grid_m,
                 )
             except Exception as e:  # noqa: BLE001
                 self._push_msg({

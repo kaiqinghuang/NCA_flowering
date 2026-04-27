@@ -117,11 +117,7 @@ def analyze_depth_frame(
         valid       : (H, W) bool
         s           : (H, W) signed distance to plane (NaN where invalid)
         in_polygon  : (H, W) bool — pixel projects inside the TV quad
-        on_surface  : (H, W) bool — within ``surface_eps_m`` of plane (NOT
-                      gated by polygon — this is the *plane-fit*
-                      visualization, which should track the entire TV
-                      surface even when the calibrated polygon is an
-                      inscribed rectangle that's tighter than the TV).
+        on_surface  : (H, W) bool — within ``surface_eps_m`` of plane AND in polygon
         in_box      : (H, W) bool — slab ``[near, far]`` AND in polygon
     """
     dmm = np.asarray(depth_mm_flat, dtype=np.uint16).reshape(DEPTH_H, DEPTH_W)
@@ -165,16 +161,7 @@ def analyze_depth_frame(
     in_polygon = points_in_quad_2d(u_coord, v_coord, tv_cal.corners_uv) & valid
     out["in_polygon"] = in_polygon
 
-    # Plane-fit visualization: every valid pixel within ``surface_eps_m`` of
-    # the calibrated plane, NOT clipped by the polygon. The 4-corner polygon
-    # is intentionally an INSCRIBED rectangle (slightly smaller than the TV
-    # so all 4 corners stay inside the on-plane blob), so gating
-    # ``on_surface`` by the polygon would cosmetically shrink the magenta
-    # fill and make the plane fit *look* worse than it is. ``in_box``
-    # below (used by the runtime fingertip detector) IS still gated by
-    # the polygon — that's correct, the interaction box should match the
-    # calibrated quadrilateral.
-    on_surface = valid & np.isfinite(s) & (np.abs(s) <= surface_eps_m)
+    on_surface = in_polygon & np.isfinite(s) & (np.abs(s) <= surface_eps_m)
     out["on_surface"] = on_surface
 
     in_box = (
@@ -608,186 +595,6 @@ def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
     return [tuple(map(float, pts[best_perm[i]])) for i in range(4)]
 
 
-def _max_rect_in_binary_mask(mask: np.ndarray) -> Tuple[int, int, int, int]:
-    """Largest axis-aligned all-ones rectangle in a binary mask.
-
-    Standard histogram-stack method, O(H·W):
-
-        For each row r, ``h[c]`` = #consecutive 1-cells in column ``c``
-        ending at row ``r``. The largest rectangle of 1s ending at row r
-        is the largest rectangle in the histogram h, found in O(W) with a
-        monotonic stack. Track the global max over all rows.
-
-    Args:
-        mask: (H, W) uint8/bool, non-zero = inside blob.
-
-    Returns:
-        ``(top, left, height, width)`` of the largest all-ones rectangle.
-        ``mask[top:top+height, left:left+width]`` is fully 1. If the mask
-        has no 1s, returns ``(0, 0, 0, 0)``.
-    """
-    H, W = int(mask.shape[0]), int(mask.shape[1])
-    if H == 0 or W == 0:
-        return (0, 0, 0, 0)
-    h = [0] * W
-    best_area = 0
-    best = (0, 0, 0, 0)
-    for r in range(H):
-        row = mask[r]
-        for c in range(W):
-            h[c] = h[c] + 1 if row[c] else 0
-        # Largest rect in histogram h (with sentinel via c == W → cur = 0).
-        stack: list[int] = []
-        for c in range(W + 1):
-            cur = 0 if c == W else h[c]
-            while stack and h[stack[-1]] >= cur:
-                top_h = h[stack.pop()]
-                left = stack[-1] if stack else -1
-                width = c - left - 1
-                area = top_h * width
-                if area > best_area:
-                    best_area = area
-                    best = (r - top_h + 1, left + 1, top_h, width)
-            stack.append(c)
-    return best
-
-
-def _largest_inscribed_aligned_rect_uv(
-    pts2d: np.ndarray,
-    rect_center: np.ndarray,
-    ru: np.ndarray,
-    rv: np.ndarray,
-    grid_step_m: float,
-    cv2_mod,
-    tolerance_m: float = 0.025,
-) -> Optional[np.ndarray]:
-    """Largest rectangle aligned with ``(ru, rv)`` and (mostly) inscribed in the blob.
-
-    Unlike ``cv2.minAreaRect`` (which produces an *outer* bounding rect
-    whose corners stick out beyond the blob — visible in the debug
-    overlay as a polygon outline that overshoots the magenta on-plane
-    fill), this rasterises the blob's plane-projected (u, v) points into
-    a binary grid in the rect-aligned frame, then finds the largest
-    axis-aligned all-ones rectangle in that grid via the histogram
-    method.
-
-    A pure 100%-inscribed LIR tends to come out *much* smaller than the
-    actual TV — depth dropouts, specular reflections and slight bezel
-    bleed leave small holes / jagged edges in the blob, and any single
-    hole inside the rect kills it. To recover a sensible rect we first
-    DILATE the rasterised blob by ``tolerance_m`` (rounded to grid
-    cells); the LIR is then computed on the dilated mask, so the
-    returned rectangle:
-
-        * spans across small inner holes / specks of black noise inside
-          the blob (those holes are ≤ tolerance and got filled by
-          dilation), and
-        * may extend up to ``tolerance_m`` past the blob's actual outer
-          boundary (the dilation grew the boundary outward).
-
-    With ``tolerance_m = 0`` this reduces to the strict-inscribed LIR
-    where every cell of the returned rectangle is guaranteed to be a
-    blob cell.
-
-    Args:
-        pts2d:        (N, 2) blob points in the plane's (u, v) coords (m).
-        rect_center:  (2,)  origin of the rect-aligned frame in (u, v).
-        ru, rv:       (2,)  unit, perpendicular axes of the rect frame.
-        grid_step_m:  rasterisation step (meters/cell). 5–10 mm is a good
-                      range: small enough that quantisation loses < 1 cm
-                      of corner accuracy, large enough that adjacent
-                      depth pixels (~4 mm at 1.5 m range) land in the
-                      same cell so the grid is dense.
-        cv2_mod:      passed-in ``cv2`` module (avoid re-importing).
-        tolerance_m:  how much "black noise" the rect is allowed to
-                      contain — larger ⇒ rect can grow across bigger
-                      holes / jagged edges, but is allowed to extend
-                      that much past the blob's true boundary too.
-                      Default 25 mm covers typical Kinect depth-dropout
-                      gaps and TV-content-induced holes; bump it up if
-                      the LIR is consistently coming out smaller than
-                      the actual TV.
-
-    Returns:
-        ``(4, 2)`` ndarray of (u, v) corners in rect-frame TL/TR/BR/BL
-        order, *or* ``None`` if no usable rectangle exists (caller
-        should fall back to the bounding rect).
-    """
-    if pts2d.shape[0] < 4:
-        return None
-    rel = pts2d - rect_center
-    proj_u = rel @ ru
-    proj_v = rel @ rv
-
-    u_lo, u_hi = float(proj_u.min()), float(proj_u.max())
-    v_lo, v_hi = float(proj_v.min()), float(proj_v.max())
-    if (u_hi - u_lo) < 4 * grid_step_m or (v_hi - v_lo) < 4 * grid_step_m:
-        return None
-
-    # Pad the grid by tolerance + a couple of cells so the dilated blob
-    # has room to grow without clipping at the grid border (which would
-    # artificially cap the rect on that side).
-    tol_cells = max(0, int(round(float(tolerance_m) / float(grid_step_m))))
-    pad = (tol_cells + 2) * grid_step_m
-    u_origin = u_lo - pad
-    v_origin = v_lo - pad
-    W = int(np.ceil((u_hi - u_lo + 2.0 * pad) / grid_step_m)) + 1
-    H = int(np.ceil((v_hi - v_lo + 2.0 * pad) / grid_step_m)) + 1
-    if H < 4 or W < 4 or H * W > 1_000_000:
-        return None
-
-    j = ((proj_u - u_origin) / grid_step_m).astype(np.int32)
-    i = ((proj_v - v_origin) / grid_step_m).astype(np.int32)
-    np.clip(j, 0, W - 1, out=j)
-    np.clip(i, 0, H - 1, out=i)
-    mask = np.zeros((H, W), dtype=np.uint8)
-    mask[i, j] = 1
-
-    # Always close 1-cell pinholes from grid-quantisation aliasing
-    # (independent of user-tunable tolerance).
-    base_ker = cv2_mod.getStructuringElement(cv2_mod.MORPH_RECT, (3, 3))
-    mask = cv2_mod.morphologyEx(mask, cv2_mod.MORPH_CLOSE, base_ker)
-
-    # Tolerance-driven dilation. This is the user-facing knob: every cell
-    # of the dilated mask is either a blob cell or within ``tol_cells``
-    # of one. The LIR computed on this is therefore allowed to cover
-    # non-blob "noise" cells, but only up to that radius.
-    if tol_cells > 0:
-        k = 2 * tol_cells + 1
-        ker = cv2_mod.getStructuringElement(cv2_mod.MORPH_RECT, (k, k))
-        mask = cv2_mod.dilate(mask, ker)
-
-    # Largest CC: defends against any stray dot that survived earlier
-    # depth/colour morphology and got dilated into a small island.
-    n_lbl, labels, stats, _ = cv2_mod.connectedComponentsWithStats(mask, connectivity=8)
-    if n_lbl < 2:
-        return None
-    sizes = stats[1:, cv2_mod.CC_STAT_AREA]
-    best_lbl = 1 + int(np.argmax(sizes))
-    mask = (labels == best_lbl).astype(np.uint8)
-
-    rect_top, rect_left, rect_h, rect_w = _max_rect_in_binary_mask(mask)
-    if rect_w < 2 or rect_h < 2:
-        return None
-
-    # Inscribed rect in rect-frame coords. Use cell *inner* corners
-    # (rect_left+0.5, rect_top+0.5) → (rect_left+rect_w-0.5, rect_top+rect_h-0.5)
-    # so we don't leak ½ cell out of the rasterised mask near the edges.
-    u0 = u_origin + (rect_left + 0.5) * grid_step_m
-    u1 = u_origin + (rect_left + rect_w - 0.5) * grid_step_m
-    v0 = v_origin + (rect_top + 0.5) * grid_step_m
-    v1 = v_origin + (rect_top + rect_h - 0.5) * grid_step_m
-
-    rect_corners_local = np.array(
-        [[u0, v0], [u1, v0], [u1, v1], [u0, v1]],  # rect-frame TL/TR/BR/BL
-        dtype=np.float64,
-    )
-    uv_corners = rect_center + (
-        rect_corners_local[:, 0:1] * ru + rect_corners_local[:, 1:2] * rv
-    )
-    return uv_corners
-
-
 def auto_calibrate_tv_from_depth(
     depth_frames: Iterable[np.ndarray],
     *,
@@ -804,8 +611,6 @@ def auto_calibrate_tv_from_depth(
     morph_open_px: int = 3,
     color_max_v: float = 90.0,
     color_close_px: int = 3,
-    inscribe_tolerance_m: float = 0.025,
-    inscribe_grid_step_m: float = 0.007,
 ) -> dict:
     """One-shot TV plane + 4-corner derivation, depth + colour fused.
 
@@ -823,15 +628,9 @@ def auto_calibrate_tv_from_depth(
            the largest connected component of what survives. (Falls back
            gracefully to the depth-only blob if mapping is unavailable
            or the filter wipes everything.)
-        6. Project the refined blob to the plane (u, v); use
-           ``cv2.minAreaRect`` ONLY for the orientation, then find the
-           largest rectangle (mostly) INSCRIBED in the blob along that
-           orientation (LIR — Largest Inscribed Rectangle, with
-           ``inscribe_tolerance_m`` slack so small black-noise holes
-           inside the blob are forgiven). The 4 corners and 4 edges of
-           the resulting rectangle therefore sit inside the on-plane
-           blob (within tolerance), unlike ``minAreaRect``'s outer
-           bounding box whose corners always overshoot.
+        6. Project the refined blob to the plane (u, v), fit a min-area
+           rotated rectangle. **No further geometric trim** — the colour
+           pass already removed the wood, so the rect is tight.
         7. Reconstruct 3D corners → sort into TL/TR/BR/BL.
 
     Returns a dict (always with ``ok``):
@@ -964,23 +763,7 @@ def auto_calibrate_tv_from_depth(
             "reason": "no color frame / mapping supplied (depth-only fit)",
         }
 
-    # ---- 6. Project refined blob to plane → orientation + INSCRIBED rect. ----
-    # Why not the bounding minAreaRect on its own: it must enclose every
-    # blob pixel, so its 4 corners stick out into empty space whenever
-    # the on-plane blob is anything less than a perfect rectangle —
-    # nearly always, because the screen edges always have some depth
-    # dropout / noise. In the debug overlay this looks like the magenta
-    # polygon outline overshooting the magenta on-plane fill at one or
-    # more corners.
-    #
-    # Fix: use minAreaRect ONLY to obtain a stable orientation, then
-    # find the largest rectangle (mostly) INSCRIBED in the blob along
-    # that orientation. The inscribed rectangle is computed by
-    # rasterising the blob in the rect-aligned frame, dilating by
-    # ``inscribe_tolerance_m`` to forgive small black-noise holes, and
-    # running the standard histogram-stack LIR algorithm. Every corner
-    # and every edge of the returned rectangle therefore sits inside
-    # the on-plane blob (within tolerance), so it never overshoots.
+    # ---- 6. Project refined blob to plane, min-area rect (no extra trim). ----
     n_vec = np.array([a, b, c], dtype=np.float64)
     arbitrary = np.array([1.0, 0.0, 0.0]) if abs(n_vec[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     u_tmp = arbitrary - np.dot(arbitrary, n_vec) * n_vec
@@ -1004,56 +787,19 @@ def auto_calibrate_tv_from_depth(
     u_coords = rel_x * u_tmp[0] + rel_y * u_tmp[1] + rel_z * u_tmp[2]
     v_coords = rel_x * v_tmp[0] + rel_y * v_tmp[1] + rel_z * v_tmp[2]
 
-    pts2d = np.stack([u_coords, v_coords], axis=1)  # (N, 2) float64, full
-    if pts2d.shape[0] < 4:
-        return {"ok": False, "reason": "refined blob has <4 in-plane points"}
+    pts2d = np.stack([u_coords, v_coords], axis=1).astype(np.float32)
+    if pts2d.shape[0] > 8000:
+        idx = rng.choice(pts2d.shape[0], 8000, replace=False)
+        pts2d = pts2d[idx]
+    rect = cv2.minAreaRect(pts2d.reshape(-1, 1, 2))
+    box2d = cv2.boxPoints(rect)  # (4, 2) in same units as pts2d (meters)
 
-    # Stable orientation from minAreaRect (subsampled for speed; the
-    # angle is robust to subsampling, the bounding box itself we
-    # discard).
-    pts2d_f32 = pts2d.astype(np.float32)
-    if pts2d_f32.shape[0] > 8000:
-        idx = rng.choice(pts2d_f32.shape[0], 8000, replace=False)
-        sample = pts2d_f32[idx]
-    else:
-        sample = pts2d_f32
-    rect = cv2.minAreaRect(sample.reshape(-1, 1, 2))
-    rect_center = np.array(rect[0], dtype=np.float64)
-    angle_deg = float(rect[2])
-    theta = float(np.deg2rad(angle_deg))
-    ru = np.array([np.cos(theta), np.sin(theta)], dtype=np.float64)
-    rv = np.array([-np.sin(theta), np.cos(theta)], dtype=np.float64)
+    raw_corners = []
+    for u_c, v_c in box2d:
+        c3 = origin_tmp + float(u_c) * u_tmp + float(v_c) * v_tmp
+        raw_corners.append(c3)
+    raw_corners_arr = np.stack(raw_corners, axis=0)  # (4, 3)
 
-    # Largest rectangle (mostly) inscribed in the blob, aligned with
-    # (ru, rv). ``inscribe_tolerance_m`` is the user-tunable knob: how
-    # much "black noise" the rect is allowed to contain — bumping it up
-    # lets the rect span across bigger holes / jagged edges, but means
-    # the rect may extend that much past the blob's actual outer
-    # boundary too. Default 25 mm is enough to forgive typical Kinect
-    # depth-dropout gaps and TV-content-induced holes without
-    # noticeably overshooting the real screen.
-    box_uv = _largest_inscribed_aligned_rect_uv(
-        pts2d, rect_center, ru, rv,
-        grid_step_m=float(inscribe_grid_step_m),
-        cv2_mod=cv2,
-        tolerance_m=float(inscribe_tolerance_m),
-    )
-    inscribed = box_uv is not None
-    if box_uv is None:
-        # Fallback (very unusual — degenerate blob): use the bounding
-        # rect so calibration still completes; corners may sit slightly
-        # outside the blob in this branch.
-        box_uv = np.asarray(cv2.boxPoints(rect), dtype=np.float64)
-
-    raw_corners_arr = np.stack(
-        [origin_tmp + float(uc) * u_tmp + float(vc) * v_tmp
-         for uc, vc in box_uv],
-        axis=0,
-    )  # (4, 3)
-
-    # LIR returns a perfect rectangle in the (u, v) plane, so consecutive
-    # edge lengths are the rect's two side lengths. (For the bounding-box
-    # fallback the same formulas hold — boxPoints is also a rectangle.)
     edge_a = float(np.linalg.norm(raw_corners_arr[1] - raw_corners_arr[0]))
     edge_b = float(np.linalg.norm(raw_corners_arr[2] - raw_corners_arr[1]))
     area_m2 = edge_a * edge_b
@@ -1070,6 +816,4 @@ def auto_calibrate_tv_from_depth(
         "edge_a_m": edge_a,
         "edge_b_m": edge_b,
         "color_info": color_info,
-        "inscribed": bool(inscribed),
-        "inscribe_tolerance_m": float(inscribe_tolerance_m),
     }
