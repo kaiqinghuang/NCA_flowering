@@ -232,11 +232,12 @@ def render_depth_debug_bgr(
 
     * **Magenta fill** = pixels within ``surface_eps_m`` of the fitted plane
       AND inside the calibrated TV polygon → real TV surface confirmation.
-    * **Orange outline** = interaction-box contour (slab ``[box_near,
-      box_far]`` along the plane normal, inside the polygon) → where the
-      hand will be detected. We draw the outline rather than filling the
-      interior so the fingertip and depth pseudocolor stay readable.
     * **Magenta polygon outline** = the calibrated 4-corner TV rectangle.
+    * **Orange wireframe (4 top edges + 4 vertical struts)** = the 3D
+      interaction box rising ``box_far_m`` above the TV plane → makes the
+      detection volume obvious even when no hand is present.
+    * **Orange fill** = pixels currently inside the interaction box → when
+      a hand enters the slab its silhouette lights up orange.
     * **Yellow circle** = SDK HandTipRight (when visible, useful during
       calibration).
     * **White cross + ring** = the depth-derived fingertip used at runtime.
@@ -271,22 +272,16 @@ def render_depth_debug_bgr(
         if in_box is not None and in_box.shape == bgr.shape[:2]:
             n_box = int(np.count_nonzero(in_box))
             if n_box > 0:
-                # Orange solid outline (BGR (0, 140, 255)). We outline the
-                # interaction-box mask instead of tinting the interior so
-                # the fingertip and underlying depth stay readable.
-                contours, _ = cv2.findContours(
-                    in_box.astype(np.uint8),
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_SIMPLE,
-                )
-                if contours:
-                    cv2.drawContours(
-                        bgr, contours, -1, (0, 140, 255), 2, cv2.LINE_AA,
-                    )
+                # Bright orange fill — when a hand enters the slab its
+                # silhouette lights up clearly (was a faint green before).
+                orange = np.array([0.0, 165.0, 255.0], dtype=np.float32)  # BGR orange
+                bf = bgr.astype(np.float32)
+                m = in_box[:, :, None]
+                bgr = np.where(m, bf * 0.30 + orange * 0.70, bf).astype(np.uint8)
 
-        # Outline: project the 4 captured 3D corners to depth pixels
+        # ---- Magenta TV polygon outline (the actual screen surface) ----
+        corners_uv_px: list = []
         try:
-            corners_uv_px = []
             for c3 in tv_cal.corners_3d or []:
                 cx, cy, cz = c3
                 if cz <= 0.05:
@@ -305,6 +300,49 @@ def render_depth_debug_bgr(
                         (u_px + 6, v_px - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 200, 255), 1, cv2.LINE_AA,
                     )
+        except Exception:  # noqa: BLE001
+            corners_uv_px = []
+
+        # ---- Orange 3D wireframe of the interaction box ----
+        # Bottom 4 corners = the TV corners (already drawn as magenta
+        # polygon above). Top 4 corners = TV corners offset by box_far_m
+        # along the plane normal (which is oriented toward the camera, so
+        # +n moves "up" out of the screen). Drawing only the top 4 edges
+        # and the 4 vertical struts gives a "hollow box rising off the TV"
+        # look without obscuring the magenta surface marker underneath.
+        try:
+            plane_obj = getattr(tv_cal, "plane", None)
+            if (
+                plane_obj is not None
+                and len(corners_uv_px) == 4
+                and tv_cal.corners_3d
+                and box_far_m > 0
+            ):
+                n3 = np.array([plane_obj.a, plane_obj.b, plane_obj.c], dtype=np.float64)
+                top_uv_px: list = []
+                ok = True
+                for c3 in tv_cal.corners_3d:
+                    cxt = float(c3[0]) + box_far_m * float(n3[0])
+                    cyt = float(c3[1]) + box_far_m * float(n3[1])
+                    czt = float(c3[2]) + box_far_m * float(n3[2])
+                    if czt <= 0.05:
+                        ok = False
+                        break
+                    ut = DEPTH_CX + (cxt * DEPTH_FX) / czt
+                    vt = DEPTH_CY + (cyt * DEPTH_FY) / czt
+                    top_uv_px.append((int(round(ut)), int(round(vt))))
+                if ok and len(top_uv_px) == 4:
+                    orange_bgr = (0, 165, 255)
+                    top_pts = np.array(top_uv_px, dtype=np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(
+                        bgr, [top_pts], isClosed=True,
+                        color=orange_bgr, thickness=2, lineType=cv2.LINE_AA,
+                    )
+                    for (u_b, v_b), (u_t, v_t) in zip(corners_uv_px, top_uv_px):
+                        cv2.line(
+                            bgr, (u_b, v_b), (u_t, v_t),
+                            orange_bgr, 2, cv2.LINE_AA,
+                        )
         except Exception:  # noqa: BLE001
             pass
 

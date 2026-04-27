@@ -158,7 +158,8 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | TURBO pseudo-color | raw depth |
 | **magenta polygon outline** | the 4 auto-derived corners projected to the depth image — should hug the actual TV |
 | **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon |
-| **orange outline** | contour of the interaction box: pixels in the plane-normal slab `[BRIDGE_DEPTH_BAND_MIN_M, BRIDGE_DEPTH_BAND_MAX_M]` *and* inside the polygon. Drawn as an outline (not a fill) so the fingertip and underlying depth stay readable |
+| **orange wireframe** | the 3D interaction box: 4 top edges + 4 vertical struts rising `BRIDGE_DEPTH_BAND_MAX_M` above the TV plane. Always visible; shows where the detection volume sits in space |
+| **orange fill** | depth pixels currently inside the slab `[BRIDGE_DEPTH_BAND_MIN_M, BRIDGE_DEPTH_BAND_MAX_M]` *and* inside the polygon — i.e. the hand silhouette while a hand is in the box |
 | **yellow circle** | live SDK `HandTipRight` (visual reference only — no longer used for calibration) |
 | **white cross + ring** | the depth-derived fingertip used at runtime (closest-to-plane median of the K nearest pixels) |
 
