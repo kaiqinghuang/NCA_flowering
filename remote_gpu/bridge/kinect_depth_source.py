@@ -363,8 +363,9 @@ class KinectDepthSource:
                 # touching code (matches knobs documented in README.md).
                 eps_m = float(os.environ.get("BRIDGE_AUTOFIT_EPS_M", "0.015"))
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
-                color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "40"))
+                color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "90"))
                 color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
+                trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "1.5"))
                 result = auto_calibrate_tv_from_depth(
                     buf,
                     color_bgr=last_color_bgr if color_enable else None,
@@ -373,6 +374,7 @@ class KinectDepthSource:
                     morph_open_px=open_px,
                     color_max_v=color_max_v,
                     color_close_px=color_close_px,
+                    trim_pct=trim_pct,
                 )
             except Exception as e:  # noqa: BLE001
                 self._push_msg({
@@ -401,7 +403,8 @@ class KinectDepthSource:
             print(
                 f"[kinect-depth] autocal: blob={result['n_blob_px']}px  "
                 f"area={result['area_m2']:.3f}m²  "
-                f"edges={result['edge_a_m']:.3f}×{result['edge_b_m']:.3f}m"
+                f"edges={result['edge_a_m']:.3f}×{result['edge_b_m']:.3f}m  "
+                f"trim={result.get('trim_pct_used', 0.0):.1f}%"
                 f"{color_log}"
             )
             self._push_msg({

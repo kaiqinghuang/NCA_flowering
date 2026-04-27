@@ -609,8 +609,9 @@ def auto_calibrate_tv_from_depth(
     z_min_m: float = 0.4,
     z_max_m: float = 4.5,
     morph_open_px: int = 3,
-    color_max_v: float = 40.0,
+    color_max_v: float = 90.0,
     color_close_px: int = 3,
+    trim_pct: float = 1.5,
 ) -> dict:
     """One-shot TV plane + 4-corner derivation, depth + colour fused.
 
@@ -621,17 +622,29 @@ def auto_calibrate_tv_from_depth(
            thin depth-connected bridges to neighbouring co-planar wood
            strips (cheap, doesn't fight us further down).
         4. Largest connected component = depth-only TV blob candidate.
-        5. **(NEW) Colour refinement.** If a colour frame and the SDK's
+        5. **Colour refinement.** If a colour frame and the SDK's
            depth→colour mapping were supplied, look up each blob pixel's
            RGB value and discard everything brighter than ``color_max_v``
            — wood/bezels are bright, the TV screen is near-black. Take
            the largest connected component of what survives. (Falls back
            gracefully to the depth-only blob if mapping is unavailable
            or the filter wipes everything.)
-        6. Project the refined blob to the plane (u, v), fit a min-area
-           rotated rectangle. **No further geometric trim** — the colour
-           pass already removed the wood, so the rect is tight.
+        6. Project the refined blob to the plane (u, v), then derive 4
+           corners via **PCA + percentile trim** instead of
+           ``cv2.minAreaRect``. PCA finds the TV's long/short axes; we
+           take the ``[trim_pct, 100 − trim_pct]`` percentile of the
+           projection along each axis as the rectangle bounds. This is
+           robust to a small fraction of co-planar outliers that survive
+           the colour pass (e.g. bezel transition pixels at the front
+           edge of the TV) — those would otherwise drag a strict min-area
+           rect outward.
         7. Reconstruct 3D corners → sort into TL/TR/BR/BL.
+
+    Args:
+        trim_pct: percentage of points to discard at *each* end of *each*
+                  PCA axis when fitting the rectangle. ``1.5`` keeps the
+                  central 97% of points along each axis. Set to ``0`` to
+                  fall back to a strict min/max bounding box.
 
     Returns a dict (always with ``ok``):
         ok, reason
@@ -642,6 +655,7 @@ def auto_calibrate_tv_from_depth(
         area_m2           : float TV rectangle area in m²
         ransac_inlier_pts : int   how many points fed to RANSAC
         color_info        : diagnostic dict from the colour-refine stage
+        trim_pct_used     : float trim percentage actually applied
     """
     try:
         import cv2  # type: ignore
@@ -763,7 +777,10 @@ def auto_calibrate_tv_from_depth(
             "reason": "no color frame / mapping supplied (depth-only fit)",
         }
 
-    # ---- 6. Project refined blob to plane, min-area rect (no extra trim). ----
+    # ---- 6. Project refined blob to plane, then PCA + percentile fit. ----
+    # Build a provisional orthonormal basis (u_tmp, v_tmp) on the plane —
+    # this is just any 2D frame; the PCA below realigns to the TV's actual
+    # long/short axes regardless of how (u_tmp, v_tmp) happen to be rotated.
     n_vec = np.array([a, b, c], dtype=np.float64)
     arbitrary = np.array([1.0, 0.0, 0.0]) if abs(n_vec[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
     u_tmp = arbitrary - np.dot(arbitrary, n_vec) * n_vec
@@ -787,12 +804,55 @@ def auto_calibrate_tv_from_depth(
     u_coords = rel_x * u_tmp[0] + rel_y * u_tmp[1] + rel_z * u_tmp[2]
     v_coords = rel_x * v_tmp[0] + rel_y * v_tmp[1] + rel_z * v_tmp[2]
 
-    pts2d = np.stack([u_coords, v_coords], axis=1).astype(np.float32)
-    if pts2d.shape[0] > 8000:
-        idx = rng.choice(pts2d.shape[0], 8000, replace=False)
-        pts2d = pts2d[idx]
-    rect = cv2.minAreaRect(pts2d.reshape(-1, 1, 2))
-    box2d = cv2.boxPoints(rect)  # (4, 2) in same units as pts2d (meters)
+    pts2d = np.stack([u_coords, v_coords], axis=1)  # (N, 2) in meters
+    if pts2d.shape[0] < 4:
+        return {"ok": False, "reason": "too few blob points after projection"}
+
+    # PCA on the in-plane points: principal axis = TV's long edge.
+    centroid_uv = pts2d.mean(axis=0)
+    centered = pts2d - centroid_uv
+    cov = np.cov(centered, rowvar=False)
+    eigvals, eigvecs = np.linalg.eigh(cov)  # ascending eigvals; columns of eigvecs
+    order = np.argsort(eigvals)[::-1]        # descending: long axis first
+    e1 = eigvecs[:, order[0]]                # long  edge direction in (u_tmp, v_tmp)
+    e2 = eigvecs[:, order[1]]                # short edge direction
+    # Force a right-handed basis (det > 0) for a stable orientation —
+    # doesn't change geometry, just makes the corner ordering deterministic.
+    if e1[0] * e2[1] - e1[1] * e2[0] < 0:
+        e2 = -e2
+
+    proj_e1 = centered @ e1                  # (N,) projection on long axis
+    proj_e2 = centered @ e2                  # (N,) projection on short axis
+
+    # Percentile bounds on each axis: discard the most extreme `trim_pct`%
+    # of points at each end. This rejects the small population of bezel /
+    # transition pixels that survive the colour pass and would otherwise
+    # drag a strict bounding box outward (especially on the front edge).
+    trim = max(0.0, min(15.0, float(trim_pct)))
+    if trim > 0.0:
+        e1_lo, e1_hi = np.percentile(proj_e1, [trim, 100.0 - trim])
+        e2_lo, e2_hi = np.percentile(proj_e2, [trim, 100.0 - trim])
+    else:
+        e1_lo, e1_hi = float(proj_e1.min()), float(proj_e1.max())
+        e2_lo, e2_hi = float(proj_e2.min()), float(proj_e2.max())
+
+    edge_a = float(e1_hi - e1_lo)
+    edge_b = float(e2_hi - e2_lo)
+    if edge_a < 1e-3 or edge_b < 1e-3:
+        return {"ok": False, "reason": f"degenerate rect from PCA fit ({edge_a:.4f}m × {edge_b:.4f}m)"}
+
+    # 4 corners in (u_tmp, v_tmp) space. Order: long-min/short-min →
+    # long-max/short-min → long-max/short-max → long-min/short-max
+    # (CCW in PCA frame). Final TL/TR/BR/BL assignment is done by
+    # `_assign_corners_TL_TR_BR_BL` based on (X, Z) in camera space, so
+    # any consistent CCW order here is fine.
+    box_pca = np.array([
+        [e1_lo, e2_lo],
+        [e1_hi, e2_lo],
+        [e1_hi, e2_hi],
+        [e1_lo, e2_hi],
+    ], dtype=np.float64)
+    box2d = centroid_uv + box_pca[:, 0:1] * e1 + box_pca[:, 1:2] * e2  # (4, 2)
 
     raw_corners = []
     for u_c, v_c in box2d:
@@ -800,8 +860,6 @@ def auto_calibrate_tv_from_depth(
         raw_corners.append(c3)
     raw_corners_arr = np.stack(raw_corners, axis=0)  # (4, 3)
 
-    edge_a = float(np.linalg.norm(raw_corners_arr[1] - raw_corners_arr[0]))
-    edge_b = float(np.linalg.norm(raw_corners_arr[2] - raw_corners_arr[1]))
     area_m2 = edge_a * edge_b
 
     sorted_corners = _assign_corners_TL_TR_BR_BL(raw_corners_arr)
@@ -816,4 +874,5 @@ def auto_calibrate_tv_from_depth(
         "edge_a_m": edge_a,
         "edge_b_m": edge_b,
         "color_info": color_info,
+        "trim_pct_used": float(trim),
     }

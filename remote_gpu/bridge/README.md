@@ -101,10 +101,18 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
      this single test cleanly removes them.
    * Closes pinholes (`BRIDGE_AUTOFIT_COLOR_CLOSE_PX`) and takes the
      largest CC again as the final TV mask,
-   * Wraps a `cv2.minAreaRect` around the colour-refined blob's
-     in-plane (u, v) points → 4 corners in 3D,
-   * Sorts into TL/TR/BR/BL by (X, Z): front (smaller Z) = top,
-     right (larger X) = right,
+   * Projects the colour-refined blob to the plane (u, v) and runs a
+     **PCA + percentile** rectangle fit: PCA finds the TV's long /
+     short edges, then we take the
+     `[BRIDGE_AUTOFIT_TRIM_PCT, 100 − BRIDGE_AUTOFIT_TRIM_PCT]`
+     percentile of the per-axis projections as the rectangle bounds.
+     This rejects the small population of bezel / transition pixels
+     that survive the colour pass and would otherwise drag a strict
+     `cv2.minAreaRect` outward (typically visible as the front edge
+     pushing past the actual TV in the debug overlay). Set
+     `BRIDGE_AUTOFIT_TRIM_PCT=0` to fall back to a strict bounding box.
+   * Sorts the 4 corners into TL/TR/BR/BL by (X, Z): front (smaller Z)
+     = top, right (larger X) = right,
    * SVD-refits the plane on the 4 sorted corners and solves the
      homography to the canvas. Result saved to `tv_calibration.json`.
 
@@ -119,6 +127,17 @@ bright)`, telling you exactly how much of the depth blob was wood/bezel.
   or check that the TV is actually showing dark content.
 * To disable the colour pass entirely (e.g. debugging): set
   `BRIDGE_AUTOFIT_COLOR_ENABLE=0`.
+
+**Tuning the rectangle fit:**
+* If one of the 4 corners (typically TL/TR — the front edge of the TV
+  closest to the camera, where bezel transition pixels survive the
+  colour pass) is **outside** the actual TV in the debug overlay →
+  raise `BRIDGE_AUTOFIT_TRIM_PCT` (e.g. `1.5 → 3.0` or `5.0`). Each unit
+  trims one extra percent of the most-extreme PCA-projected points at
+  every end of every axis.
+* If the rectangle is **smaller** than the actual TV (corners eating
+  into the screen) → lower it (`1.5 → 0.5`) or set `0` to use a strict
+  bounding box.
 
 **Reset TV Calibration** deletes the saved file. Re-run Auto-Calibrate
 any time the camera moves.
@@ -152,6 +171,7 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
 | `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | max brightness (max(B,G,R), 0–255) to count as TV-black |
 | `BRIDGE_AUTOFIT_COLOR_CLOSE_PX` | `3` | morph-close kernel (px) on the colour-refined mask |
+| `BRIDGE_AUTOFIT_TRIM_PCT` | `1.5` | per-side percentile trim on the PCA rect fit. Higher = tighter rect (rejects more outliers); `0` = strict min/max bounding box |
 
 Other auto-calibration parameters are currently set in code defaults
 (`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,
