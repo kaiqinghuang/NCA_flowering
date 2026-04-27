@@ -7,10 +7,12 @@ NCA browser client. The runtime is **depth-first**:
   height, slightly tilted toward the screen.
 * TV calibration is **one-click automatic**: capture ~1.5 s of depth
   frames, RANSAC-fit the dominant 3D plane, isolate the largest
-  co-planar blob (= the TV screen), wrap a min-area rectangle around
-  it to get 4 corners, and assign them to canvas TL/TR/BR/BL by their
-  (X, Z) in camera space (front=top, right=right). The result is saved
-  to `tv_calibration.json`.
+  co-planar blob (= the TV screen), derive 4 corners — the rear two
+  (BR/BL) from a min-area bounding rectangle, the front two (TL/TR)
+  from the blob's own top-K front-diagonal extremes so they always
+  sit on the visible front edge — and assign them to canvas
+  TL/TR/BR/BL by their (X, Z) in camera space (front=top, right=right).
+  The result is saved to `tv_calibration.json`.
 * At runtime, the bridge ignores the SDK skeleton: the depth frame is
   filtered by *(inside the calibrated TV polygon) ∧ (signed distance to
   plane within `[0.02, 0.45]`m)*, and the **fingertip = pixel closest to
@@ -102,11 +104,17 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
    * Closes pinholes (`BRIDGE_AUTOFIT_COLOR_CLOSE_PX`) and takes the
      largest CC again as the final TV mask,
    * Wraps a `cv2.minAreaRect` around the colour-refined blob's
-     in-plane (u, v) points → 4 corners in 3D,
-   * Sorts into TL/TR/BR/BL by (X, Z): front (smaller Z) = top,
+     in-plane (u, v) points → 4 bounding-box corners in 3D,
+   * Sorts those into TL/TR/BR/BL by (X, Z): front (smaller Z) = top,
      right (larger X) = right,
-   * SVD-refits the plane on the 4 sorted corners and solves the
-     homography to the canvas. Result saved to `tv_calibration.json`.
+   * **Refines TL/TR** (the front pair) by averaging the top-50 blob
+     pixels furthest in the front-and-left / front-and-right diagonal
+     directions — pulls the front corners off the bounding-rect's
+     overshoot back onto the blob's actual visible front edge while
+     leaving BR/BL (which already sit on the dense back edge) untouched,
+   * SVD-refits the plane on the 4 (now possibly slightly trapezoidal)
+     corners and solves the homography to the canvas. Result saved to
+     `tv_calibration.json`.
 
 The status bar will show e.g. `color: 8214→5103px (removed 37.9% as
 bright)`, telling you exactly how much of the depth blob was wood/bezel.

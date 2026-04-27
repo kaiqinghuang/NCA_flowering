@@ -806,6 +806,87 @@ def auto_calibrate_tv_from_depth(
 
     sorted_corners = _assign_corners_TL_TR_BR_BL(raw_corners_arr)
 
+    # ---- 6b. Refine front corners (TL/TR) to actual blob front-extreme pixels.
+    #
+    # minAreaRect's bounding rectangle puts TL/TR at the rect's front-edge
+    # corners — those extend OUTWARD beyond the blob's actual front edge
+    # whenever there are any front-side stragglers/outliers, even on an
+    # otherwise-rectangular blob. BR/BL routinely sit on the back edge
+    # because the back is dense and well-defined, so we leave them alone
+    # and only re-derive TL/TR from the blob itself.
+    #
+    # Strategy: project the FULL (un-subsampled) blob to the (u, v) plane,
+    # define the back→front axis from the BR-BL midpoint to the TR-TL
+    # midpoint (this direction is reliable because BR/BL are accurate),
+    # define the perpendicular left→right axis, then for each of TL/TR
+    # take the K=50 most-extreme blob pixels along the corresponding
+    # diagonal and average them. Top-K averaging absorbs single-pixel
+    # noise while keeping the corner planted on the dense front edge,
+    # which is exactly the visible front-tip of the magenta blob.
+    refine_K = 50
+    pts2d_full = np.stack([u_coords, v_coords], axis=1)
+    if pts2d_full.shape[0] >= 4:
+        TL_3d, TR_3d, BR_3d, BL_3d = sorted_corners
+
+        def _to_uv(c3d: tuple) -> np.ndarray:
+            rel = np.asarray(c3d, dtype=np.float64) - origin_tmp
+            return np.array(
+                [float(rel @ u_tmp), float(rel @ v_tmp)], dtype=np.float64
+            )
+
+        TL_uv = _to_uv(TL_3d)
+        TR_uv = _to_uv(TR_3d)
+        BR_uv = _to_uv(BR_3d)
+        BL_uv = _to_uv(BL_3d)
+
+        back_mid = 0.5 * (BL_uv + BR_uv)
+        front_mid = 0.5 * (TL_uv + TR_uv)
+        front_dir = front_mid - back_mid
+        right_dir = (BR_uv + TR_uv) - (BL_uv + TL_uv)
+
+        front_norm = float(np.linalg.norm(front_dir))
+        right_norm = float(np.linalg.norm(right_dir))
+
+        if front_norm > 1e-6 and right_norm > 1e-6:
+            front_axis = front_dir / front_norm
+            right_axis = right_dir / right_norm
+
+            rel_pts = pts2d_full - back_mid
+            proj_front = rel_pts @ front_axis
+            proj_right = rel_pts @ right_axis
+
+            score_TL = proj_front - proj_right
+            score_TR = proj_front + proj_right
+
+            n_pts = pts2d_full.shape[0]
+            K = int(min(refine_K, max(1, n_pts // 4)))
+            if K <= 1 or n_pts <= K:
+                TL_new_uv = pts2d_full[int(np.argmax(score_TL))]
+                TR_new_uv = pts2d_full[int(np.argmax(score_TR))]
+            else:
+                idx_TL = np.argpartition(-score_TL, K - 1)[:K]
+                idx_TR = np.argpartition(-score_TR, K - 1)[:K]
+                TL_new_uv = pts2d_full[idx_TL].mean(axis=0)
+                TR_new_uv = pts2d_full[idx_TR].mean(axis=0)
+
+            TL_new_3d = (
+                origin_tmp
+                + float(TL_new_uv[0]) * u_tmp
+                + float(TL_new_uv[1]) * v_tmp
+            )
+            TR_new_3d = (
+                origin_tmp
+                + float(TR_new_uv[0]) * u_tmp
+                + float(TR_new_uv[1]) * v_tmp
+            )
+
+            sorted_corners = [
+                tuple(map(float, TL_new_3d)),
+                tuple(map(float, TR_new_3d)),
+                tuple(map(float, BR_3d)),
+                tuple(map(float, BL_3d)),
+            ]
+
     return {
         "ok": True,
         "corners_3d": sorted_corners,
