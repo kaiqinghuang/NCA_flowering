@@ -815,17 +815,24 @@ def auto_calibrate_tv_from_depth(
     # because the back is dense and well-defined, so we leave them alone
     # and only re-derive TL/TR from the blob itself.
     #
-    # Strategy: project the FULL (un-subsampled) blob to the (u, v) plane,
-    # define the back→front axis from the BR-BL midpoint to the TR-TL
-    # midpoint (this direction is reliable because BR/BL are accurate),
-    # define the perpendicular left→right axis, then for each of TL/TR
-    # take the K=50 most-extreme blob pixels along the corresponding
-    # diagonal and average them. Top-K averaging absorbs single-pixel
-    # noise while keeping the corner planted on the dense front edge,
-    # which is exactly the visible front-tip of the magenta blob.
+    # Strategy (two-step, decoupled): project the FULL (un-subsampled) blob
+    # to the (u, v) plane, define the back→front axis from the BR-BL
+    # midpoint to the TR-TL midpoint (reliable because BR/BL are accurate),
+    # and the perpendicular left→right axis. Then:
+    #   1. Pick the K_front most-front blob pixels (the dense visible
+    #      front-edge cluster) — single 2 % pool, large enough that any
+    #      front-centre "tongue"/spike no longer dominates.
+    #   2. Inside that pool, pick the K leftmost and K rightmost as TL_new
+    #      and TR_new. These two sub-sets are DISJOINT by construction so
+    #      TL_new and TR_new can never collapse onto the same 3D point.
+    # A final sanity check (TL_new vs TR_new ≥ 5 cm apart in 3D) falls
+    # back to the original min-area-rect corners if the geometry is too
+    # degenerate to refine — guarantees we never feed _finalize a
+    # zero-length TL→TR direction.
     refine_K = 50
     pts2d_full = np.stack([u_coords, v_coords], axis=1)
-    if pts2d_full.shape[0] >= 4:
+    n_pts = int(pts2d_full.shape[0])
+    if n_pts >= 4 * refine_K:  # need enough pixels to split front pool 50/50
         TL_3d, TR_3d, BR_3d, BL_3d = sorted_corners
 
         def _to_uv(c3d: tuple) -> np.ndarray:
@@ -855,19 +862,18 @@ def auto_calibrate_tv_from_depth(
             proj_front = rel_pts @ front_axis
             proj_right = rel_pts @ right_axis
 
-            score_TL = proj_front - proj_right
-            score_TR = proj_front + proj_right
+            # Step 1: front cluster = top ~2% most-front pixels (≥ 2*K).
+            K_front = int(max(2 * refine_K, min(n_pts - 1, n_pts // 50)))
+            front_idx = np.argpartition(-proj_front, K_front - 1)[:K_front]
+            cluster_uv = pts2d_full[front_idx]
+            cluster_right = proj_right[front_idx]
 
-            n_pts = pts2d_full.shape[0]
-            K = int(min(refine_K, max(1, n_pts // 4)))
-            if K <= 1 or n_pts <= K:
-                TL_new_uv = pts2d_full[int(np.argmax(score_TL))]
-                TR_new_uv = pts2d_full[int(np.argmax(score_TR))]
-            else:
-                idx_TL = np.argpartition(-score_TL, K - 1)[:K]
-                idx_TR = np.argpartition(-score_TR, K - 1)[:K]
-                TL_new_uv = pts2d_full[idx_TL].mean(axis=0)
-                TR_new_uv = pts2d_full[idx_TR].mean(axis=0)
+            # Step 2: within the front cluster, K leftmost = TL, K rightmost = TR.
+            K = int(min(refine_K, K_front // 2))
+            tl_local = np.argpartition(cluster_right, K - 1)[:K]
+            tr_local = np.argpartition(-cluster_right, K - 1)[:K]
+            TL_new_uv = cluster_uv[tl_local].mean(axis=0)
+            TR_new_uv = cluster_uv[tr_local].mean(axis=0)
 
             TL_new_3d = (
                 origin_tmp
@@ -880,12 +886,16 @@ def auto_calibrate_tv_from_depth(
                 + float(TR_new_uv[1]) * v_tmp
             )
 
-            sorted_corners = [
-                tuple(map(float, TL_new_3d)),
-                tuple(map(float, TR_new_3d)),
-                tuple(map(float, BR_3d)),
-                tuple(map(float, BL_3d)),
-            ]
+            tl_tr_gap_m = float(np.linalg.norm(TR_new_3d - TL_new_3d))
+            if tl_tr_gap_m >= 0.05:
+                sorted_corners = [
+                    tuple(map(float, TL_new_3d)),
+                    tuple(map(float, TR_new_3d)),
+                    tuple(map(float, BR_3d)),
+                    tuple(map(float, BL_3d)),
+                ]
+            # else: refinement collapsed (very narrow / degenerate blob);
+            # fall back silently to the bounding-rect corners.
 
     return {
         "ok": True,
