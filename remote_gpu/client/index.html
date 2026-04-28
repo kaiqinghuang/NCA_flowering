@@ -60,9 +60,11 @@
                 pointer-events: none; font-family: monospace; z-index: 10; }
   #calOverlay.hidden { display: none; }
 
-  /* Canvas corner labels — pin TL/TR/BR/BL badges to the four canvas corners
-     so the operator can verify the bridge's auto-calibration mapping
-     (depth debug shows TL/TR/BR/BL in magenta; these match by colour + text). */
+  /* Canvas corner labels — pin TL/TR/BR/BL badges to the four canvas
+     corners. The bridge's depth detection labels its 4 corners A/B/C/D;
+     these canvas-side TL/TR/BR/BL badges are the *target* of that mapping,
+     letting the operator visually verify (and later remap) which detected
+     corner should drive which canvas corner. */
   .corner-label { position: absolute; padding: 3px 7px;
                   font-family: monospace; font-size: 11px; font-weight: 700;
                   color: #fff; background: rgba(255, 0, 255, 0.85);
@@ -192,10 +194,13 @@
       <div class="help" style="margin-top:6px;">
         Clear hands &amp; people from view, then click <b>Auto-Calibrate</b>.
         The bridge captures ~1.5 s of depth, RANSAC-fits the dominant plane,
-        keeps the largest co-planar blob (= the TV screen), and assigns its 4
-        corners to canvas TL/TR/BR/BL by their (X, Z) in camera space (front =
-        top, right = right). Use the depth debug view below to verify the
-        magenta polygon hugs the actual TV.
+        keeps the largest co-planar blob (= the TV screen), and labels its 4
+        detected corners <b>A/B/C/D</b> (clockwise from front-left in camera
+        space). The canvas's own four corners are <b>TL/TR/BR/BL</b>; the
+        mapping between the two is what drives where you paint. Use the
+        depth debug view below to see A/B/C/D in magenta, and the badges on
+        the canvas to see TL/TR/BR/BL — adjust the mapping until they line up
+        the way you want.
         <span id="kinectModeHelp" style="display:block;margin-top:4px;color:#777;"></span>
       </div>
       <div class="row" style="gap:6px; margin-top:8px;">
@@ -1238,7 +1243,8 @@ if (tvCalResetBtn) tvCalResetBtn.onclick = function() {
 };
 if (kDebugToggleBtn) kDebugToggleBtn.onclick = function() { setKDebugEnabled(!kDebugEnabled); };
 
-// --- Canvas corner labels (TL/TR/BR/BL) ---
+// --- Canvas corner labels (TL/TR/BR/BL — fixed canvas-side anchors;
+//     bridge-detected corners are A/B/C/D and map to these) ---
 function setCornerLabelsVisible(on) {
   cornerLabelsVisible = !!on;
   for (var i = 0; i < cornerLabelEls.length; i++) {

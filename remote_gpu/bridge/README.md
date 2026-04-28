@@ -7,8 +7,9 @@ NCA browser client. The runtime is **depth-first**:
   height, slightly tilted toward the screen.
 * TV calibration is **one-click automatic**: capture ~1.5 s of depth
   frames, RANSAC-fit the dominant 3D plane, isolate the largest
-  co-planar blob (= the TV screen), wrap a min-area rectangle around
-  it to get 4 corners, and assign them to canvas TL/TR/BR/BL by their
+  co-planar blob (= the TV screen), fit a tight rectangle around it
+  to get 4 corners, and assign them to **A/B/C/D** (clockwise from
+  front-left, mapped to canvas **TL/TR/BR/BL** respectively) by their
   (X, Z) in camera space (front=top, right=right). The result is saved
   to `tv_calibration.json`.
 * At runtime, the bridge ignores the SDK skeleton: the depth frame is
@@ -114,7 +115,8 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
      edge — without pulling the (usually clean) back edge inward. Set
      `BRIDGE_AUTOFIT_TRIM_PCT=0` (and leave the front/back overrides
      unset) to fall back to a strict bounding box.
-   * Sorts the 4 corners into TL/TR/BR/BL by (X, Z): front (smaller Z)
+   * Sorts the 4 corners into **A/B/C/D** (clockwise from front-left,
+     mapped to canvas **TL/TR/BR/BL**) by (X, Z): front (smaller Z)
      = top, right (larger X) = right,
    * SVD-refits the plane on the 4 sorted corners and solves the
      homography to the canvas. Result saved to `tv_calibration.json`.
@@ -136,12 +138,12 @@ bright)`, telling you exactly how much of the depth blob was wood/bezel.
   `BRIDGE_AUTOFIT_TRIM_PCT` is the symmetric default; the front-back axis
   honours `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` and `BRIDGE_AUTOFIT_TRIM_BACK_PCT`
   if those are set.
-* **TL/TR drifting in front of the TV** (most common case — bezel transition
+* **A/B drifting in front of the TV** (most common case — bezel transition
   pixels survive the colour pass on the edge closest to the camera):
   raise `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` (e.g. `1.5`). Each unit trims one
   extra percent of the most-extreme PCA-projected points on the front side.
-* **BL/BR drifting outside the TV**: raise `BRIDGE_AUTOFIT_TRIM_BACK_PCT`.
-* **BL/BR shrinking inward** (back edge already clean from the colour pass,
+* **C/D drifting outside the TV**: raise `BRIDGE_AUTOFIT_TRIM_BACK_PCT`.
+* **C/D shrinking inward** (back edge already clean from the colour pass,
   but trim is eating it): set `BRIDGE_AUTOFIT_TRIM_BACK_PCT=0`.
 * **Whole rectangle eating into the TV**: lower `BRIDGE_AUTOFIT_TRIM_PCT`
   or set `0` to use a strict bounding box.
@@ -180,8 +182,8 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | max brightness (max(B,G,R), 0–255) to count as TV-black |
 | `BRIDGE_AUTOFIT_COLOR_CLOSE_PX` | `3` | morph-close kernel (px) on the colour-refined mask |
 | `BRIDGE_AUTOFIT_TRIM_PCT` | `1.5` | per-side percentile trim on the **left-right** axis of the PCA rect fit. Also the default for front/back when their overrides are unset. `0` = strict min/max bounding box |
-| `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` | _(inherits TRIM_PCT)_ | trim on the **front** edge of the TV (closer to the camera). Raise to pull TL/TR inward when bezel pixels leak past the colour filter |
-| `BRIDGE_AUTOFIT_TRIM_BACK_PCT` | _(inherits TRIM_PCT)_ | trim on the **back** edge of the TV (farther from the camera). Set to `0` to keep BL/BR pinned to the actual blob extent |
+| `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` | _(inherits TRIM_PCT)_ | trim on the **front** edge of the TV (closer to the camera). Raise to pull A/B inward when bezel pixels leak past the colour filter |
+| `BRIDGE_AUTOFIT_TRIM_BACK_PCT` | _(inherits TRIM_PCT)_ | trim on the **back** edge of the TV (farther from the camera). Set to `0` to keep C/D pinned to the actual blob extent |
 
 Other auto-calibration parameters are currently set in code defaults
 (`auto_calibrate_tv_from_depth(...)`): RANSAC inlier threshold `2 cm`,
@@ -200,8 +202,8 @@ Every broadcast frame:
   "confident": true,
   "tv_ready": true,
   "tv_status": {"mode": "idle", "ready": true, "current_corner": 0,
-                "label": "TL", "captured": 0, "total": 4,
-                "labels": ["TL", "TR", "BR", "BL"]},
+                "label": "A", "captured": 0, "total": 4,
+                "labels": ["A", "B", "C", "D"]},
   "body_tip_xyz": [0.18, -0.12, 1.42],
   "body_tracked": true,
   "tip_signed_dist_m": 0.083,

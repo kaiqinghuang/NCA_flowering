@@ -13,8 +13,9 @@ Opens **Body | Depth | Color** so we can:
   largest co-planar blob, then **use the SDK CoordinateMapper to look up
   the RGB colour of every blob pixel and discard anything that isn't
   near-black** (the TV screen is dark, the surrounding wood slats are
-  bright). The colour-refined blob's `cv2.minAreaRect` gives the 4
-  corners, sorted TL/TR/BR/BL by (X, Z) and committed by the bridge.
+  bright). The colour-refined blob's PCA + percentile fit gives the 4
+  corners, sorted A/B/C/D (clockwise from front-left → canvas
+  TL/TR/BR/BL) by (X, Z) and committed by the bridge.
 
 The Color stream costs ~30 MB/s on USB-3 but we don't process it during
 the live loop — we only sample one frame during the calibration burst.

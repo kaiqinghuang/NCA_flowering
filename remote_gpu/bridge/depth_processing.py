@@ -17,8 +17,8 @@ Pipeline (per Kinect v2 depth frame, 512×424, millimeters):
 This module also exposes ``auto_calibrate_tv_from_depth`` — a one-shot
 routine that fits the TV plane via RANSAC on a stack of depth frames,
 isolates the largest co-planar blob (= the TV screen), and derives the
-4 rectangle corners (rotated bounding box) sorted into TL/TR/BR/BL by
-their (X, Z) position in camera space.
+4 rectangle corners (rotated bounding box) sorted into A/B/C/D by their
+(X, Z) position in camera space (clockwise from front-left).
 
 There is **no pinch heuristic** here: while a fingertip exists in the box,
 the bridge emits ``pinch=True`` so the canvas paints continuously.
@@ -296,9 +296,9 @@ def render_depth_debug_bgr(
                 for i, (u_px, v_px) in enumerate(corners_uv_px):
                     cv2.circle(bgr, (u_px, v_px), 5, (255, 0, 255), -1, cv2.LINE_AA)
                     cv2.putText(
-                        bgr, "TLTRBRBL"[i * 2:i * 2 + 2],
+                        bgr, "ABCD"[i:i + 1],
                         (u_px + 6, v_px - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 200, 255), 1, cv2.LINE_AA,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 255), 1, cv2.LINE_AA,
                     )
         except Exception:  # noqa: BLE001
             corners_uv_px = []
@@ -602,14 +602,14 @@ def _refine_blob_with_color(
     return final_mask, info
 
 
-def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
-    """Permute 4 (x, y, z) corners to canvas-order [TL, TR, BR, BL].
+def _assign_corners_A_B_C_D(corners_3d: np.ndarray) -> list:
+    """Permute 4 (x, y, z) corners to canvas-order [A, B, C, D].
 
-    Convention (matches user's setup, after Y-down convention is enforced):
-        - canvas TopLeft  ↔ smaller Z (front, closer to Kinect) AND smaller X (left)
-        - canvas TopRight ↔ smaller Z (front)                    AND larger  X (right)
-        - canvas BottomRight ↔ larger Z (back)                   AND larger  X
-        - canvas BottomLeft  ↔ larger Z (back)                   AND smaller X
+    Labels (clockwise from front-left, after Y-down convention is enforced):
+        - A ↔ canvas TopLeft     ↔ smaller Z (front, closer to Kinect) AND smaller X (left)
+        - B ↔ canvas TopRight    ↔ smaller Z (front)                   AND larger  X (right)
+        - C ↔ canvas BottomRight ↔ larger  Z (back)                    AND larger  X
+        - D ↔ canvas BottomLeft  ↔ larger  Z (back)                    AND smaller X
 
     Robust to arbitrary in-plane rotation: we score by angle around the
     centroid in the (X, Z) plane. ``atan2(dx, -dz)`` puts +"front" at angle 0
@@ -622,10 +622,10 @@ def _assign_corners_TL_TR_BR_BL(corners_3d: np.ndarray) -> list:
     cz = float(pts[:, 2].mean())
     angles = np.arctan2(pts[:, 0] - cx, -(pts[:, 2] - cz))  # 0=front, +π/2=right
     target = np.array([
-        -np.pi / 4.0,   # TL: front-left  (dx<0, dz<0)
-        +np.pi / 4.0,   # TR: front-right (dx>0, dz<0)
-        +3 * np.pi / 4.0,  # BR: back-right (dx>0, dz>0)
-        -3 * np.pi / 4.0,  # BL: back-left  (dx<0, dz>0)
+        -np.pi / 4.0,   # A: front-left  (dx<0, dz<0)
+        +np.pi / 4.0,   # B: front-right (dx>0, dz<0)
+        +3 * np.pi / 4.0,  # C: back-right (dx>0, dz>0)
+        -3 * np.pi / 4.0,  # D: back-left  (dx<0, dz>0)
     ])
     best_perm = None
     best_cost = np.inf
@@ -691,7 +691,8 @@ def auto_calibrate_tv_from_depth(
            colour pass — typically concentrated on the front edge — while
            leaving the back edge untouched if you set
            ``trim_pct_back = 0``.
-        7. Reconstruct 3D corners → sort into TL/TR/BR/BL.
+        7. Reconstruct 3D corners → sort into A/B/C/D (clockwise from
+           the front-left, mapped to canvas TL/TR/BR/BL respectively).
 
     Args:
         trim_pct: percentage of points to discard at each end of the
@@ -708,7 +709,7 @@ def auto_calibrate_tv_from_depth(
 
     Returns a dict (always with ``ok``):
         ok, reason
-        corners_3d        : list of 4 (x, y, z) tuples (TL, TR, BR, BL)
+        corners_3d        : list of 4 (x, y, z) tuples (A, B, C, D)
         plane             : (a, b, c, d) with origin-side positive
         n_blob_px         : int   pixel count of the chosen TV blob
                                   (after colour refinement, if applied)
@@ -933,8 +934,8 @@ def auto_calibrate_tv_from_depth(
 
     # 4 corners in (u_tmp, v_tmp) space. Order: long-min/short-min →
     # long-max/short-min → long-max/short-max → long-min/short-max
-    # (CCW in PCA frame). Final TL/TR/BR/BL assignment is done by
-    # `_assign_corners_TL_TR_BR_BL` based on (X, Z) in camera space, so
+    # (CCW in PCA frame). Final A/B/C/D assignment is done by
+    # `_assign_corners_A_B_C_D` based on (X, Z) in camera space, so
     # any consistent CCW order here is fine.
     box_pca = np.array([
         [e1_lo, e2_lo],
@@ -952,7 +953,7 @@ def auto_calibrate_tv_from_depth(
 
     area_m2 = edge_a * edge_b
 
-    sorted_corners = _assign_corners_TL_TR_BR_BL(raw_corners_arr)
+    sorted_corners = _assign_corners_A_B_C_D(raw_corners_arr)
 
     return {
         "ok": True,

@@ -2,14 +2,20 @@
 
 Replaces the old separate `Calibration` (canvas pinch corners) and
 `PlaneCalibration` (auto RANSAC plane). One pass of 4 manually-confirmed
-corners (TL → TR → BR → BL) gives us:
+corners (A → B → C → D, clockwise from the front-left) gives us:
 
     1. The TV plane (least-squares fit of the 4 captured 3D points).
-    2. A right-handed orthonormal basis (origin = TL, u along TL→TR,
-       v along TL→BL projected onto the plane).
+    2. A right-handed orthonormal basis (origin = A, u along A→B,
+       v along A→D projected onto the plane).
     3. The polygon (4 corners) projected to that 2D basis — used to
        restrict depth-mode segmentation to "above the TV" only.
     4. A 3x3 homography from plane-local (u, v) to canvas (cx, cy).
+
+The 4 corner labels A/B/C/D map to canvas position TL/TR/BR/BL:
+    A = front-left  (smaller Z, smaller X) → canvas top-left
+    B = front-right (smaller Z, larger  X) → canvas top-right
+    C = back-right  (larger  Z, larger  X) → canvas bottom-right
+    D = back-left   (larger  Z, smaller X) → canvas bottom-left
 
 Persisted to `tv_calibration.json` next to this module.
 """
@@ -23,7 +29,7 @@ from typing import Optional, Tuple
 import numpy as np
 
 
-CORNER_LABELS: Tuple[str, str, str, str] = ("TL", "TR", "BR", "BL")
+CORNER_LABELS: Tuple[str, str, str, str] = ("A", "B", "C", "D")
 
 
 @dataclass
@@ -212,16 +218,17 @@ class TVCalibration:
         except Exception:  # noqa: BLE001
             pass
 
-    def commit_auto(self, corners_tl_tr_br_bl) -> TVCalibrationResult:
+    def commit_auto(self, corners_abcd) -> TVCalibrationResult:
         """Commit a 4-corner calibration sourced from auto depth-plane fit.
 
-        ``corners_tl_tr_br_bl`` must be a sequence of 4 (x, y, z) points
-        already ordered as TL, TR, BR, BL in camera space. We re-fit the
-        plane with SVD on those 4 points (so the plane stays consistent
-        with the corners), then run the same finalisation as the manual
-        wizard (basis, polygon (u,v), homography → canvas).
+        ``corners_abcd`` must be a sequence of 4 (x, y, z) points
+        already ordered as A, B, C, D in camera space (front-left,
+        front-right, back-right, back-left). We re-fit the plane with
+        SVD on those 4 points (so the plane stays consistent with the
+        corners), then run the same finalisation as the manual wizard
+        (basis, polygon (u, v), homography → canvas).
         """
-        seq = list(corners_tl_tr_br_bl)
+        seq = list(corners_abcd)
         if len(seq) != 4:
             return TVCalibrationResult(False, "auto-commit needs exactly 4 corners")
         try:
@@ -254,18 +261,18 @@ class TVCalibration:
         proj = np.stack([_project_to_plane(np.asarray(p, dtype=np.float64), plane)
                          for p in self.captured])  # (4, 3)
         origin = proj[0].copy()
-        u_dir_raw = proj[1] - proj[0]  # TL → TR
+        u_dir_raw = proj[1] - proj[0]  # A → B
         u_dir_raw -= n * np.dot(u_dir_raw, n)
         u_norm = float(np.linalg.norm(u_dir_raw))
         if u_norm < 1e-6:
-            return TVCalibrationResult(False, "TL→TR direction is degenerate")
+            return TVCalibrationResult(False, "A→B direction is degenerate")
         u_basis = u_dir_raw / u_norm
         v_basis = np.cross(n, u_basis)
         vn = float(np.linalg.norm(v_basis))
         if vn < 1e-9:
             return TVCalibrationResult(False, "v basis degenerate")
         v_basis /= vn
-        # Make sure v_basis points TL → BL (canvas +y).
+        # Make sure v_basis points A → D (canvas +y).
         if np.dot(proj[3] - proj[0], v_basis) < 0:
             v_basis = -v_basis
 
