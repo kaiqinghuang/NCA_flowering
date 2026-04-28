@@ -52,6 +52,14 @@ class DepthHandResult:
     tip_signed_dist_m: float                 # plane-relative depth of the tip
     debug_uv_tip: Tuple[float, float]        # depth pixel coordinate (for overlay)
     in_box_px: int                           # how many depth pixels in interaction box
+    # Y-axis "shadow" of the fingertip on the TV plane: drop the tip
+    # along the world Y axis until it hits the plane. ``shadow_xyz`` is
+    # the resulting 3D point (always on the plane), ``debug_uv_shadow``
+    # is its depth-pixel projection. Set to (0,0,0) / (-1,-1) when the
+    # plane is too vertical to give a stable Y-intersection or when the
+    # tip is not tracked.
+    shadow_xyz: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    debug_uv_shadow: Tuple[float, float] = (-1.0, -1.0)
 
 
 # ----------------------------------------------------------------------
@@ -99,6 +107,47 @@ def _empty_result() -> DepthHandResult:
         debug_uv_tip=(-1.0, -1.0),
         in_box_px=0,
     )
+
+
+def y_axis_shadow_on_plane(
+    tip_xyz: Tuple[float, float, float],
+    plane,
+) -> Tuple[Tuple[float, float, float], Tuple[float, float]]:
+    """Drop ``tip_xyz`` along the world Y axis onto the TV plane.
+
+    Geometry:
+        Line through the tip parallel to the Y axis::
+            P(t) = (xf, yf + t, zf)
+        Plane equation (with (a,b,c) the unit normal)::
+            a*x + b*y + c*z + d = 0
+        Substituting and solving for t::
+            t = -(a*xf + b*yf + c*zf + d) / b = -s_f / b
+        where ``s_f`` is the fingertip's signed distance to the plane.
+
+        The intersection is therefore ``(xf, yf - s_f/b, zf)`` — same
+        X and Z as the fingertip, Y shifted to land on the plane (this
+        is the "gravity shadow" of the tip when the TV is roughly
+        horizontal). For a vertical TV (|b| → 0) the line is parallel
+        to the plane and there is no clean intersection — we return
+        the all-zero / sentinel result and the caller treats it as
+        "no shadow available this frame".
+
+    Returns:
+        ((shadow_x, shadow_y, shadow_z), (u_px, v_px))
+        or ((0,0,0), (-1,-1)) if the projection is degenerate.
+    """
+    a, b, c, d = plane.a, plane.b, plane.c, plane.d
+    if abs(b) < 1e-3:
+        return (0.0, 0.0, 0.0), (-1.0, -1.0)
+    sx = float(tip_xyz[0])
+    sz = float(tip_xyz[2])
+    s_f = a * sx + b * float(tip_xyz[1]) + c * sz + d
+    sy = float(tip_xyz[1]) - s_f / b
+    if sz <= 0.05:
+        return (0.0, 0.0, 0.0), (-1.0, -1.0)
+    u_px = DEPTH_CX + (sx * DEPTH_FX) / sz
+    v_px = DEPTH_CY + (sy * DEPTH_FY) / sz
+    return (sx, sy, sz), (float(u_px), float(v_px))
 
 
 def _largest_connected_component(mask: np.ndarray, min_size: int = 0) -> np.ndarray:
@@ -302,6 +351,9 @@ def analyze_depth_frame(
     debug_uv = (float(np.median(sel_u)), float(np.median(sel_v)))
 
     confident = n_hand >= max(min_box_px * 2, 200)
+    shadow_xyz, shadow_uv = y_axis_shadow_on_plane(
+        (tip_x, tip_y, tip_z), plane,
+    )
 
     out["result"] = DepthHandResult(
         tracked=True,
@@ -310,6 +362,8 @@ def analyze_depth_frame(
         tip_signed_dist_m=tip_s,
         debug_uv_tip=debug_uv,
         in_box_px=n_hand,
+        shadow_xyz=shadow_xyz,
+        debug_uv_shadow=shadow_uv,
     )
     return out
 
@@ -338,6 +392,10 @@ def render_depth_debug_bgr(
       specks above the TV surface don't show up).
     * **Red square (5×5 px)** = the depth-derived fingertip — the
       pixel inside the orange hand blob closest to the magenta plane.
+    * **Green square (5×5 px)** = Y-axis "shadow" of the fingertip on
+      the TV plane (drop the fingertip straight down along world Y
+      until it hits the plane). Hidden when the plane is too vertical
+      to give a stable Y-intersection.
     """
     try:
         import cv2
@@ -449,21 +507,29 @@ def render_depth_debug_bgr(
         except Exception:  # noqa: BLE001
             pass
 
-    # Depth-derived fingertip — small pure-red filled square at the
-    # closest-to-plane pixel inside the hand blob.
+    # Depth-derived fingertip + Y-axis shadow on the plane — small
+    # filled squares (red = tip, green = shadow). Drawn last so they
+    # sit on top of every other overlay.
     tracked = False
     conf = False
     tip_uv = (-1.0, -1.0)
+    shadow_uv = (-1.0, -1.0)
     if analysis is not None:
         res = analysis.get("result")
         if res is not None:
             tracked = bool(res.tracked)
             conf = bool(res.confident)
             tip_uv = res.debug_uv_tip
+            shadow_uv = getattr(res, "debug_uv_shadow", (-1.0, -1.0))
+    sq = 2  # half-size; final square is (2*sq + 1) = 5 px on a side
+    if shadow_uv[0] >= 0 and shadow_uv[1] >= 0:
+        gu = int(np.clip(round(shadow_uv[0]), 0, DEPTH_W - 1))
+        gv = int(np.clip(round(shadow_uv[1]), 0, DEPTH_H - 1))
+        cv2.rectangle(bgr, (gu - sq, gv - sq), (gu + sq, gv + sq),
+                      (0, 255, 0), thickness=-1)
     if tip_uv[0] >= 0 and tip_uv[1] >= 0:
         tu = int(np.clip(round(tip_uv[0]), 0, DEPTH_W - 1))
         tv = int(np.clip(round(tip_uv[1]), 0, DEPTH_H - 1))
-        sq = 2  # half-size; final square is (2*sq + 1) = 5 px on a side
         cv2.rectangle(bgr, (tu - sq, tv - sq), (tu + sq, tv + sq),
                       (0, 0, 255), thickness=-1)
 

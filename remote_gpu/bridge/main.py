@@ -13,7 +13,8 @@ Bridge → Browser (JSON text, broadcast):
      "tv_ready": bool, "tv_status": {...}}
     {"op": "hand", "t": ..., "tracked": bool, "confident": bool,
      "tv_ready": bool, "tv_status": {...},
-     "cx": float?, "cy": float?,           # only when tv_ready AND tracked
+     "cx": float?, "cy": float?,           # canvas coords of the fingertip (orthogonal-to-plane)
+     "gx": float?, "gy": float?,           # canvas coords of the Y-axis "shadow" of the tip on the plane
      "tip_signed_dist_m": float,           # fingertip distance to TV plane (m); -1 when untracked
      "pinch": bool}                        # true while a fingertip is in the box
     {"op": "tv_autocalib_started"}
@@ -160,12 +161,25 @@ async def processor_loop() -> None:
         tracked = bool(raw.tracked)
         cx_canvas: Optional[float] = None
         cy_canvas: Optional[float] = None
+        gx_canvas: Optional[float] = None
+        gy_canvas: Optional[float] = None
         if tracked and tv_calibration.ready:
             mapped = tv_calibration.project_xyz_to_canvas(raw.hand_pos)
             if mapped is not None:
                 cx_canvas, cy_canvas = mapped
                 cx_canvas = max(0.0, min(CANVAS_W - 1.0, cx_canvas))
                 cy_canvas = max(0.0, min(CANVAS_H - 1.0, cy_canvas))
+            # Y-axis shadow point on the plane → its own canvas
+            # coordinate. project_xyz_to_canvas does an orthogonal-to-
+            # plane projection first, but `shadow_xyz` is already on
+            # the plane, so that step is a no-op and we get the clean
+            # canvas position of the shadow.
+            if raw.shadow_xyz is not None:
+                gmapped = tv_calibration.project_xyz_to_canvas(raw.shadow_xyz)
+                if gmapped is not None:
+                    gx_canvas, gy_canvas = gmapped
+                    gx_canvas = max(0.0, min(CANVAS_W - 1.0, gx_canvas))
+                    gy_canvas = max(0.0, min(CANVAS_H - 1.0, gy_canvas))
 
         payload = {
             "op": "hand",
@@ -186,6 +200,9 @@ async def processor_loop() -> None:
             payload["pinch"] = True   # continuous draw whenever fingertip is in box
         else:
             payload["pinch"] = False
+        if gx_canvas is not None and gy_canvas is not None:
+            payload["gx"] = gx_canvas
+            payload["gy"] = gy_canvas
 
         await _broadcast(payload)
 

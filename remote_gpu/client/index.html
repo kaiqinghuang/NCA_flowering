@@ -213,7 +213,8 @@
         <div class="k-debug-feed-label">
           Depth — magenta polygon = calibrated TV; magenta fill = pixels on plane;
           orange wireframe = interaction box; orange fill = cleaned hand silhouette;
-          red square (5×5 px) = depth fingertip (PCA extremity, EMA-smoothed)
+          red square = depth fingertip (PCA extremity, EMA-smoothed);
+          green square = Y-axis shadow of the fingertip on the plane
         </div>
         <div class="k-debug-stage k-debug-stage-depth">
           <img id="kinectDebugDepthImg" alt="depth debug stream">
@@ -1169,6 +1170,15 @@ function renderOverlay(m) {
     overlayCtx.fillStyle = 'rgba(255,255,255,0.9)';
     overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, 1.5, 0, Math.PI * 2);
     overlayCtx.fill();
+  }
+  // Y-axis shadow of the fingertip on the TV plane — small green dot.
+  // Drawn AFTER the cursor so it's never hidden by the brush halo.
+  if (typeof m.gx === 'number' && typeof m.gy === 'number') {
+    overlayCtx.fillStyle = 'rgba(0,255,0,1.0)';
+    overlayCtx.strokeStyle = 'rgba(0,0,0,0.6)';
+    overlayCtx.lineWidth = 1.0;
+    overlayCtx.beginPath(); overlayCtx.arc(m.gx, m.gy, 4, 0, Math.PI * 2);
+    overlayCtx.fill(); overlayCtx.stroke();
   }
   overlayCtx.restore();
 }

@@ -27,7 +27,11 @@ NCA browser client. The runtime is **depth-first**:
   4. Temporal EMA on the fingertip 3D position (and debug u, v) with
      factor `BRIDGE_TIP_EMA_ALPHA` (default `0.5`) to suppress
      sub-frame jitter.
-  5. While a fingertip exists in the interaction box, emit
+  5. **Y-axis shadow**: drop the smoothed fingertip along the world Y
+     axis onto the TV plane → a green debug point that's always on
+     the screen surface, broadcast as `(gx, gy)` in canvas space.
+     Useful as a "gravity reference" for tilted TVs.
+  6. While a fingertip exists in the interaction box, emit
      `pinch=true` so the canvas paints continuously.
 
 ```
@@ -170,7 +174,8 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon |
 | **orange wireframe** | the 3D interaction box: 4 top edges + 4 vertical struts rising `BRIDGE_DEPTH_BAND_MAX_M` above the TV plane. Always visible; shows where the detection volume sits in space |
 | **orange fill** | the **cleaned hand silhouette**: in-box pixels are first morph-opened with a `BRIDGE_DEBUG_NOISE_FILTER_PX` kernel (kills speckle / edge filaments) and then reduced to the largest connected component, so only the real hand shows up |
-| **red square (5×5 px)** | the depth-derived fingertip used at runtime — pixel inside the orange hand blob with the smallest signed distance to the TV plane (median of the K nearest pixels) |
+| **red square (5×5 px)** | the depth-derived fingertip — PCA extremity of the hand silhouette, disambiguated by mean signed distance to the plane, then EMA-smoothed across frames |
+| **green square (5×5 px)** | the **Y-axis shadow** of the fingertip on the TV plane — drop the red point straight down along world Y until it hits the plane. Same XZ as the fingertip, Y on the plane. Hidden when the plane is too vertical (\|b\| < 1e-3). The same 3D point is broadcast as canvas `(gx, gy)` and drawn on the HTML overlay as a green dot |
 
 ## Tuning (env vars)
 
@@ -215,9 +220,19 @@ Every broadcast frame:
   "tip_signed_dist_m": 0.083,
   "cx": 481.2,
   "cy": 270.7,
+  "gx": 478.6,
+  "gy": 322.4,
   "pinch": true
 }
 ```
+
+`(cx, cy)` is the canvas position of the fingertip projected
+**orthogonally** to the TV plane (= the brush position used for
+painting). `(gx, gy)` is the canvas position of the **Y-axis
+shadow** — the same fingertip dropped straight down along world Y
+onto the plane. For a horizontal TV the two coincide; for a tilted
+TV they differ, and the green overlay dot lets you visually compare
+where the cursor is vs. where gravity would land it.
 
 Calibration ops (browser → bridge):
 
