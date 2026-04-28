@@ -212,8 +212,8 @@
       <div id="kDebugWrap" class="k-debug-wrap hidden">
         <div class="k-debug-feed-label">
           Depth — magenta polygon = calibrated TV; magenta fill = pixels on plane;
-          orange wireframe = interaction box; orange fill = hand in box;
-          yellow = SDK HandTipRight; white = depth fingertip
+          orange wireframe = interaction box; orange fill = cleaned hand silhouette;
+          red square (5×5 px) = depth fingertip (PCA extremity, EMA-smoothed)
         </div>
         <div class="k-debug-stage k-debug-stage-depth">
           <img id="kinectDebugDepthImg" alt="depth debug stream">
@@ -1182,8 +1182,7 @@ function updateKinectDebug(m) {
   kinectDebugStats.textContent =
     'tracked: ' + (m.tracked ? 'yes' : 'no') +
     ' | tv: ' + tvLabel +
-    ' | tip→plane: ' + distCm +
-    ' | body: ' + (m.body_tracked ? 'yes' : 'no');
+    ' | tip→plane: ' + distCm;
 }
 
 // --- TV calibration UI (auto-fit only) ---

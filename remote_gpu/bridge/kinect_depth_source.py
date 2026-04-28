@@ -1,21 +1,22 @@
-"""Unified Kinect v2 runtime: Body + Depth + Color.
+"""Kinect v2 depth-only runtime.
 
-Opens **Body | Depth | Color** so we can:
+Opens **Depth + Color** (no SDK skeleton / body source — we used to also
+open Body for `HandTipRight`, but the bridge now derives the fingertip
+purely from depth, so the body channel was costing CPU + bus bandwidth
+for nothing). The two responsibilities are:
 
-* Stream `HandTipRight` 3D position from the SDK skeleton — surfaced as a
-  yellow marker in the depth-debug overlay (handy reference during
-  calibration, but no longer used for the TV plane fit).
-* Process the depth frame inside the calibrated TV interaction box to find
-  a fingertip (point with smallest signed distance to the TV plane) — used
-  at runtime to drive the canvas brush.
-* Run a one-shot **auto TV calibration** on demand: capture ~35 depth
-  frames + 1 color frame, RANSAC-fit the dominant plane, isolate the
-  largest co-planar blob, then **use the SDK CoordinateMapper to look up
-  the RGB colour of every blob pixel and discard anything that isn't
-  near-black** (the TV screen is dark, the surrounding wood slats are
-  bright). The colour-refined blob's PCA + percentile fit gives the 4
-  corners, sorted A/B/C/D (clockwise from front-left → canvas
-  TL/TR/BR/BL) by (X, Z) and committed by the bridge.
+* **Live loop** — read a depth frame each iteration, analyse it inside
+  the calibrated TV interaction box, find the fingertip (PCA-based
+  geometric extremity disambiguated by mean signed distance to the
+  plane), apply temporal EMA smoothing, and push a `RawHandFrame` to the
+  bridge processor.
+* **One-shot auto TV calibration** on demand — capture ~35 depth frames
+  + 1 color frame, RANSAC-fit the dominant plane, isolate the largest
+  co-planar blob, then use the SDK CoordinateMapper to look up the RGB
+  colour of every blob pixel and discard anything that isn't near-black
+  (the TV screen is dark, the surrounding wood slats are bright). The
+  colour-refined blob's PCA + percentile fit gives the 4 corners (sorted
+  A/B/C/D, mapped to canvas TL/TR/BR/BL by `tv_calibration`).
 
 The Color stream costs ~30 MB/s on USB-3 but we don't process it during
 the live loop — we only sample one frame during the calibration burst.
@@ -25,7 +26,8 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 
@@ -34,7 +36,20 @@ from .depth_processing import (
     auto_calibrate_tv_from_depth,
     render_depth_debug_bgr,
 )
-from .kinect_source import HAND_STATE_NOT_TRACKED, HAND_STATE_OPEN, RawHandFrame
+
+
+# ----------------------------------------------------------------------
+# Frame contract: one tick of fingertip tracking pushed to the bridge.
+# Lean by design — depth-only, so no body / thumb / wrist / hand-state
+# fields anymore.
+# ----------------------------------------------------------------------
+@dataclass
+class RawHandFrame:
+    t: float                              # wall-clock time when the frame was read
+    tracked: bool                         # is a hand currently inside the interaction box
+    hand_pos: Tuple[float, float, float]  # fingertip (x, y, z) in Kinect camera meters
+    confident: bool                       # large enough hand blob (≥ 2 × min_box_px)
+    pinch_dist_direct_m: float = -1.0     # fingertip → TV-plane signed distance (m); -1 if untracked
 
 
 class KinectDepthSource:
@@ -57,22 +72,29 @@ class KinectDepthSource:
         )
         # Morph-open kernel size used to clean the in-box mask before the
         # largest-CC pass — kills 1-px specks and breaks thin filaments
-        # that would otherwise glue noise blobs onto the real hand and
-        # destabilize the smallest-s fingertip pick. 0/1 disables it.
+        # that would otherwise glue noise blobs onto the real hand. 0/1
+        # disables it.
         self._noise_filter_px = int(
             os.environ.get("BRIDGE_DEBUG_NOISE_FILTER_PX", "3")
         )
+        # Temporal EMA on the fingertip 3D position + image-space (u,v),
+        # to suppress sub-frame jitter. α = 1.0 disables smoothing (raw),
+        # lower α = more smoothing. 0.5 is a good "feels live but stable"
+        # default at 30 Hz; drop to 0.3 if it still jitters.
+        self._tip_ema_alpha = max(
+            0.05,
+            min(1.0, float(os.environ.get("BRIDGE_TIP_EMA_ALPHA", "0.5"))),
+        )
+        self._tip_ema_xyz: Optional[Tuple[float, float, float]] = None
+        self._tip_ema_uv: Optional[Tuple[float, float]] = None
+        self._tip_ema_t: float = 0.0
+
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.started_ok = False
 
         self._debug_lock = threading.Lock()
         self._debug_depth_jpeg: Optional[bytes] = None
-
-        self._body_lock = threading.Lock()
-        self._latest_body_tip: Optional[tuple] = None
-        self._latest_body_tracked: bool = False
-        self._latest_body_t: float = 0.0
 
         self._pending_lock = threading.Lock()
         self._pending_msgs: list[dict] = []
@@ -94,16 +116,6 @@ class KinectDepthSource:
     def get_debug_depth_jpeg(self) -> Optional[bytes]:
         with self._debug_lock:
             return self._debug_depth_jpeg
-
-    def get_latest_body_tip(self) -> Optional[tuple]:
-        """Most recent SDK HandTipRight 3D position (or None if no body tracked)."""
-        with self._body_lock:
-            if self._latest_body_tip is None:
-                return None
-            # Stale guard: drop if older than ~0.4s
-            if time.time() - self._latest_body_t > 0.4:
-                return None
-            return tuple(self._latest_body_tip)
 
     def drain_pending_msgs(self) -> list[dict]:
         with self._pending_lock:
@@ -140,11 +152,8 @@ class KinectDepthSource:
         self._apply_pykinect_compat_shims()
         try:
             from pykinect2.PyKinectV2 import (
-                FrameSourceTypes_Body,
                 FrameSourceTypes_Color,
                 FrameSourceTypes_Depth,
-                JointType_HandTipRight,
-                TrackingState_Tracked,
             )
             from pykinect2 import PyKinectRuntime
         except Exception as e:  # noqa: BLE001
@@ -154,7 +163,7 @@ class KinectDepthSource:
 
         try:
             runtime = PyKinectRuntime.PyKinectRuntime(
-                FrameSourceTypes_Body | FrameSourceTypes_Depth | FrameSourceTypes_Color
+                FrameSourceTypes_Depth | FrameSourceTypes_Color
             )
         except Exception as e:  # noqa: BLE001
             print(f"[kinect-depth] Failed to open Kinect runtime: {e}")
@@ -162,7 +171,7 @@ class KinectDepthSource:
             return
 
         self.started_ok = True
-        print("[kinect-depth] Runtime started (body + depth + color).")
+        print("[kinect-depth] Runtime started (depth + color, no body).")
 
         last_debug_push = 0.0
 
@@ -171,37 +180,6 @@ class KinectDepthSource:
             if self._autocal_request.is_set():
                 self._autocal_request.clear()
                 self._do_auto_calibration(runtime)
-
-            # ----- Body frame (cheap, run every loop iter when present) -----
-            if runtime.has_new_body_frame():
-                try:
-                    bodies = runtime.get_last_body_frame()
-                    if bodies is not None:
-                        tip_xyz: Optional[tuple] = None
-                        tip_tracked = False
-                        for i in range(6):
-                            b = bodies.bodies[i]
-                            if not b.is_tracked:
-                                continue
-                            j = b.joints[JointType_HandTipRight]
-                            # Kinect SDK CameraSpacePoint uses Y-up; the rest of
-                            # the bridge (depth-pixel projection, plane fit,
-                            # signed-distance test) uses standard CV Y-down.
-                            # Flip Y once here so everything downstream is
-                            # consistent.
-                            tip_xyz = (
-                                float(j.Position.x),
-                                -float(j.Position.y),
-                                float(j.Position.z),
-                            )
-                            tip_tracked = j.TrackingState == TrackingState_Tracked
-                            break
-                        with self._body_lock:
-                            self._latest_body_tip = tip_xyz
-                            self._latest_body_tracked = tip_tracked
-                            self._latest_body_t = time.time()
-                except Exception:  # noqa: BLE001
-                    pass
 
             # ----- Depth frame (drives RawHandFrame emission) -----
             if not runtime.has_new_depth_frame():
@@ -223,50 +201,65 @@ class KinectDepthSource:
                 noise_filter_px=self._noise_filter_px,
             )
 
-            with self._body_lock:
-                body_tip_snapshot = self._latest_body_tip
-                body_tracked_snapshot = self._latest_body_tracked
-
             now = time.time()
+            res = analysis["result"]
+
+            # Temporal EMA on the fingertip — only when actively tracked.
+            # On loss-of-track we reset the EMA state so re-acquisition
+            # snaps to the new position instead of dragging from the old
+            # one.
+            if res.tracked:
+                a = self._tip_ema_alpha
+                stale = (now - self._tip_ema_t) > 0.3
+                if (
+                    self._tip_ema_xyz is None
+                    or self._tip_ema_uv is None
+                    or stale
+                    or a >= 1.0
+                ):
+                    sm_xyz = res.tip_xyz
+                    sm_uv = res.debug_uv_tip
+                else:
+                    sm_xyz = (
+                        a * res.tip_xyz[0] + (1.0 - a) * self._tip_ema_xyz[0],
+                        a * res.tip_xyz[1] + (1.0 - a) * self._tip_ema_xyz[1],
+                        a * res.tip_xyz[2] + (1.0 - a) * self._tip_ema_xyz[2],
+                    )
+                    sm_uv = (
+                        a * res.debug_uv_tip[0] + (1.0 - a) * self._tip_ema_uv[0],
+                        a * res.debug_uv_tip[1] + (1.0 - a) * self._tip_ema_uv[1],
+                    )
+                self._tip_ema_xyz = sm_xyz
+                self._tip_ema_uv = sm_uv
+                self._tip_ema_t = now
+
+                # Mutate analysis["result"] so the debug overlay's red
+                # square is drawn at the smoothed location too.
+                from dataclasses import replace as _dc_replace
+                analysis["result"] = _dc_replace(
+                    res, tip_xyz=sm_xyz, debug_uv_tip=sm_uv,
+                )
+                emit_xyz = sm_xyz
+                emit_dist = res.tip_signed_dist_m
+                emit_conf = res.confident
+            else:
+                self._tip_ema_xyz = None
+                self._tip_ema_uv = None
+                emit_xyz = (0.0, 0.0, 0.0)
+                emit_dist = -1.0
+                emit_conf = False
+
             if now - last_debug_push > 0.07:
                 last_debug_push = now
-                self._update_depth_debug_jpeg(depth_flat, analysis, body_tip_snapshot)
+                self._update_depth_debug_jpeg(depth_flat, analysis)
 
-            res = analysis["result"]
-            if res.tracked:
-                self._emit(RawHandFrame(
-                    t=now,
-                    tracked=True,
-                    hand_pos=res.tip_xyz,
-                    thumb_pos=res.tip_xyz,
-                    wrist_pos=res.tip_xyz,
-                    hand_state=HAND_STATE_OPEN,
-                    confident=res.confident,
-                    hand_color=(res.debug_uv_tip[0], res.debug_uv_tip[1]),
-                    thumb_color=(-1.0, -1.0),
-                    wrist_color=(-1.0, -1.0),
-                    pinch_raw_direct=True,            # always "drawing" while in interaction box
-                    pinch_dist_direct_m=res.tip_signed_dist_m,
-                    body_tip_xyz=body_tip_snapshot,
-                    body_tracked=body_tracked_snapshot,
-                ))
-            else:
-                self._emit(RawHandFrame(
-                    t=now,
-                    tracked=False,
-                    hand_pos=(0.0, 0.0, 0.0),
-                    thumb_pos=(0.0, 0.0, 0.0),
-                    wrist_pos=(0.0, 0.0, 0.0),
-                    hand_state=HAND_STATE_NOT_TRACKED,
-                    confident=False,
-                    hand_color=(-1.0, -1.0),
-                    thumb_color=(-1.0, -1.0),
-                    wrist_color=(-1.0, -1.0),
-                    pinch_raw_direct=False,
-                    pinch_dist_direct_m=-1.0,
-                    body_tip_xyz=body_tip_snapshot,
-                    body_tracked=body_tracked_snapshot,
-                ))
+            self._emit(RawHandFrame(
+                t=now,
+                tracked=res.tracked,
+                hand_pos=emit_xyz,
+                confident=emit_conf,
+                pinch_dist_direct_m=emit_dist,
+            ))
 
         try:
             runtime.close()
@@ -283,11 +276,11 @@ class KinectDepthSource:
     def _emit_untracked_forever(self) -> None:
         while not self._stop.is_set():
             self._emit(RawHandFrame(
-                t=time.time(), tracked=False,
-                hand_pos=(0.0, 0.0, 0.0), thumb_pos=(0.0, 0.0, 0.0),
-                wrist_pos=(0.0, 0.0, 0.0),
-                hand_state=HAND_STATE_NOT_TRACKED, confident=False,
-                hand_color=(-1.0, -1.0), thumb_color=(-1.0, -1.0), wrist_color=(-1.0, -1.0),
+                t=time.time(),
+                tracked=False,
+                hand_pos=(0.0, 0.0, 0.0),
+                confident=False,
+                pinch_dist_direct_m=-1.0,
             ))
             time.sleep(0.1)
 
@@ -483,7 +476,6 @@ class KinectDepthSource:
         self,
         depth_flat: np.ndarray,
         analysis: dict,
-        body_tip_xyz: Optional[tuple],
     ) -> None:
         try:
             import cv2
@@ -492,7 +484,6 @@ class KinectDepthSource:
                 depth_flat,
                 self.tv_cal,
                 analysis=analysis,
-                body_tip_xyz=body_tip_xyz,
                 box_near_m=self.box_near_m,
                 box_far_m=self.box_far_m,
                 surface_eps_m=self._surface_eps_m,

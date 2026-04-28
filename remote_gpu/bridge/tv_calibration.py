@@ -1,7 +1,6 @@
-"""4-corner TV calibration: SDK HandTipRight 3D points → TV plane + canvas homography.
+"""4-corner TV calibration: depth-derived 3D corners → TV plane + canvas homography.
 
-Replaces the old separate `Calibration` (canvas pinch corners) and
-`PlaneCalibration` (auto RANSAC plane). One pass of 4 detected corners
+One pass of 4 auto-detected corners
 (A → B → C → D, clockwise from the front-left in camera space) gives us:
 
     1. The TV plane (least-squares fit of the 4 captured 3D points).

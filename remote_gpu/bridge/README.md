@@ -12,12 +12,23 @@ NCA browser client. The runtime is **depth-first**:
   front-left, mapped to canvas **TL/TR/BR/BL** respectively) by their
   (X, Z) in camera space (front=top, right=right). The result is saved
   to `tv_calibration.json`.
-* At runtime, the bridge ignores the SDK skeleton: the depth frame is
-  filtered by *(inside the calibrated TV polygon) ∧ (signed distance to
-  plane within `[0.02, 0.45]`m)*, and the **fingertip = pixel closest to
-  the screen along the plane normal**. While a fingertip exists in the
-  interaction box, the bridge emits `pinch=true` so the canvas paints
-  continuously.
+* At runtime, the bridge **does not use the SDK skeleton at all** — only
+  the depth frame is processed. Pipeline per frame:
+  1. Filter pixels by *(inside the calibrated TV polygon) ∧ (signed
+     distance to plane within `[0.02, 0.45]` m)* → raw `in_box` mask.
+  2. Morph-open + largest connected component → `hand_mask` (the
+     actual hand silhouette, with single-pixel specks and edge
+     filaments stripped out).
+  3. **PCA on `hand_mask` in (u, v) image space** to find the hand's
+     long axis, take the two extrema of the projection (top/bottom 5%),
+     pick the end whose mean signed distance to the plane is smaller →
+     that end is the **fingertip**, the other end is the wrist/forearm.
+     Median (x, y, z) of the chosen end's pixels is the 3D position.
+  4. Temporal EMA on the fingertip 3D position (and debug u, v) with
+     factor `BRIDGE_TIP_EMA_ALPHA` (default `0.5`) to suppress
+     sub-frame jitter.
+  5. While a fingertip exists in the interaction box, emit
+     `pinch=true` so the canvas paints continuously.
 
 ```
 ┌────────────────────── Windows laptop ──────────────────────┐
@@ -57,20 +68,17 @@ pip install -r bridge/requirements.txt
 python -m uvicorn bridge.main:app --host 0.0.0.0 --port 7000
 ```
 
-Default mode is `depth` (Body+Depth opened together: Body for the
-calibration wizard, Depth for the runtime fingertip). To run the legacy
-SDK-only body mode (no depth, no debug image) set:
-
-```powershell
-set BRIDGE_KINECT_MODE=body
-```
+The bridge opens **Depth + Color** only — the SDK skeleton (Body)
+source is not used. Color is sampled once during auto-calibration to
+filter out non-screen co-planar surfaces (wooden frames, bezels) by
+brightness; it is not processed during the live loop.
 
 Expected boot log:
 
 ```
-[bridge] Kinect mode: depth (body+depth, depth fingertip)
-[kinect-depth] Runtime started (body + depth).
-[bridge] canvas=960x540  mode=depth  box=[0.02,0.45]m  tv_ready=no  listening on ws://0.0.0.0:7000/ws
+[bridge] Kinect runtime: depth-only (no SDK skeleton)
+[kinect-depth] Runtime started (depth + color, no body).
+[bridge] canvas=960x540  box=[0.02,0.45]m  tv_ready=no  listening on ws://0.0.0.0:7000/ws
 ```
 
 If you see `PyKinect2 import failed` the bridge keeps running but emits no
@@ -171,11 +179,11 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_PORT` | `7000` | local WS port |
 | `BRIDGE_CANVAS_W` / `_H` | `960` / `540` | must match NCA server `NCA_W/H` |
 | `BRIDGE_BROADCAST_HZ` | `30` | outgoing hand-event rate |
-| `BRIDGE_KINECT_MODE` | `depth` | `depth` (default) or `body` (legacy SDK only) |
 | `BRIDGE_DEPTH_BAND_MIN_M` | `0.02` | near edge of the interaction box (m above plane) |
 | `BRIDGE_DEPTH_BAND_MAX_M` | `0.45` | far edge of the interaction box (m above plane) |
 | `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
 | `BRIDGE_DEBUG_NOISE_FILTER_PX` | `3` | morph-open kernel (px) applied to the in-box mask before largest-CC. Stabilizes the fingertip pick by stripping single-pixel specks and ~1-px filaments that connect the hand to edge noise. Set to `0` or `1` to disable |
+| `BRIDGE_TIP_EMA_ALPHA` | `0.5` | temporal EMA factor on the fingertip 3D position (and debug u,v). `1.0` = no smoothing (raw); lower = more smoothing. Try `0.3` if the red square still jitters, `0.7` if it feels laggy |
 | `BRIDGE_AUTOFIT_EPS_M` | `0.015` | on-plane tolerance during auto-calibration |
 | `BRIDGE_AUTOFIT_OPEN_PX` | `3` | morph-open kernel (px) on the on-plane mask |
 | `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
@@ -204,8 +212,6 @@ Every broadcast frame:
   "tv_status": {"mode": "idle", "ready": true, "current_corner": 0,
                 "label": "A", "captured": 0, "total": 4,
                 "labels": ["A", "B", "C", "D"]},
-  "body_tip_xyz": [0.18, -0.12, 1.42],
-  "body_tracked": true,
   "tip_signed_dist_m": 0.083,
   "cx": 481.2,
   "cy": 270.7,

@@ -140,24 +140,37 @@ def analyze_depth_frame(
     box_far_m: float = 0.45,
     surface_eps_m: float = 0.03,
     min_box_px: int = 80,
-    tip_neighbors: int = 20,
+    tip_extremum_pct: float = 5.0,
     noise_filter_px: int = 3,
 ) -> dict:
     """Analyze one depth frame; produce result + masks for the debug overlay.
 
-    Fingertip detection pipeline:
+    Fingertip detection pipeline (PCA-based geometric extremity):
         1. ``in_box`` = pixels inside the calibrated TV quad whose signed
            distance to the plane lies in ``[box_near_m, box_far_m]``.
         2. ``in_box`` is morphologically opened with a small kernel
-           (``noise_filter_px``) — this both kills isolated single-pixel
-           specks and breaks ~1-pixel-wide filaments that connect the real
-           hand to nearby edge noise. Without this, those filaments make
-           the noise specks part of the hand's connected component, and
-           the smallest-``s`` median below gets pulled towards them.
+           (``noise_filter_px``) — kills isolated single-pixel specks and
+           breaks the ~1-px filaments that glue the real hand to nearby
+           edge-jitter noise.
         3. The cleaned mask is reduced to its largest 8-connected
            component → ``hand_mask`` (the actual hand silhouette).
-        4. Fingertip = median of the ``tip_neighbors`` smallest-``s``
-           pixels inside ``hand_mask`` (= deepest into the screen).
+        4. **PCA on hand_mask pixels in (u, v) image space** → principal
+           axis = the long axis of the hand (finger ↔ wrist).
+        5. Project all hand pixels onto the principal axis, take the two
+           extrema (top/bottom ``tip_extremum_pct`` %) → two candidate
+           "tip" clusters at the two ends of the hand.
+        6. The end whose mean signed distance ``s`` is **smaller** is the
+           one pushed toward the screen → that's the fingertip. The other
+           end is the wrist/forearm.
+        7. Fingertip 3D = median (x, y, z) of the chosen end's pixels.
+
+    Why PCA instead of "K smallest s globally"? Because the smallest-s
+    pixel is **not** always anatomically the fingertip — when the user's
+    palm is closer to the screen than the fingertip, or the hand is
+    mostly parallel to the plane, "smallest s" lands on the wrist /
+    knuckle / palm and jumps every frame. The hand's long axis is a
+    stable geometric prior, and the s-disambiguation between the two
+    extrema is computed over a 5%-cluster mean (very stable).
 
     Returns a dict with:
         result      : DepthHandResult
@@ -251,33 +264,42 @@ def analyze_depth_frame(
     if n_hand < min_box_px:
         return out
 
-    # Fingertip = pixel inside the hand blob with the smallest signed
-    # distance to the TV plane (= deepest into the screen). Median of the
-    # K smallest-s pixels gives sub-pixel jitter immunity.
-    s_hand = np.where(hand_mask, s, np.inf)
-    flat = s_hand.ravel()
-    k = min(tip_neighbors, n_hand)
-    if k <= 1:
-        idx_min = int(np.argmin(flat))
-        tv = idx_min // DEPTH_W
-        tu = idx_min % DEPTH_W
-        tip_x, tip_y, tip_z = float(x[tv, tu]), float(y[tv, tu]), float(z_m[tv, tu])
-        tip_s = float(s[tv, tu])
-        debug_uv = (float(tu), float(tv))
-    else:
-        # k smallest values via partition (O(N))
-        idx_part = np.argpartition(flat, k - 1)[:k]
-        sel_v = idx_part // DEPTH_W
-        sel_u = idx_part % DEPTH_W
-        xs = x[sel_v, sel_u]
-        ys = y[sel_v, sel_u]
-        zs = z_m[sel_v, sel_u]
-        ss = s[sel_v, sel_u]
-        tip_x = float(np.median(xs))
-        tip_y = float(np.median(ys))
-        tip_z = float(np.median(zs))
-        tip_s = float(np.median(ss))
-        debug_uv = (float(np.median(sel_u)), float(np.median(sel_v)))
+    # Geometric fingertip detection via PCA on the hand silhouette.
+    vs_idx, us_idx = np.where(hand_mask)
+    n_pix = vs_idx.size
+
+    pts2d = np.stack([us_idx.astype(np.float64), vs_idx.astype(np.float64)], axis=1)
+    centroid = pts2d.mean(axis=0)
+    centered = pts2d - centroid
+    cov = (centered.T @ centered) / max(n_pix, 1)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    principal = eigvecs[:, -1]
+    proj = centered @ principal  # (N,) projection along long axis
+
+    pct = max(1.0, min(25.0, float(tip_extremum_pct)))
+    hi_thr = np.percentile(proj, 100.0 - pct)
+    lo_thr = np.percentile(proj, pct)
+    hi_sel = proj >= hi_thr
+    lo_sel = proj <= lo_thr
+
+    s_at = s[vs_idx, us_idx]
+    mean_s_hi = float(np.mean(s_at[hi_sel])) if np.any(hi_sel) else np.inf
+    mean_s_lo = float(np.mean(s_at[lo_sel])) if np.any(lo_sel) else np.inf
+
+    # Pick the end pushed deeper into the box (smaller mean s = closer
+    # to the TV plane). That's the fingertip; the other end is wrist.
+    sel = hi_sel if mean_s_hi < mean_s_lo else lo_sel
+    sel_v = vs_idx[sel]
+    sel_u = us_idx[sel]
+    if sel_v.size == 0:
+        # Should never happen given pct >= 1%, but guard anyway.
+        return out
+
+    tip_x = float(np.median(x[sel_v, sel_u]))
+    tip_y = float(np.median(y[sel_v, sel_u]))
+    tip_z = float(np.median(z_m[sel_v, sel_u]))
+    tip_s = float(np.median(s[sel_v, sel_u]))
+    debug_uv = (float(np.median(sel_u)), float(np.median(sel_v)))
 
     confident = n_hand >= max(min_box_px * 2, 200)
 
@@ -299,7 +321,6 @@ def render_depth_debug_bgr(
     depth_mm_flat: np.ndarray,
     tv_cal,                          # TVCalibration | None
     analysis: Optional[dict] = None,
-    body_tip_xyz: Optional[Tuple[float, float, float]] = None,
     box_near_m: float = 0.02,
     box_far_m: float = 0.45,
     surface_eps_m: float = 0.03,
