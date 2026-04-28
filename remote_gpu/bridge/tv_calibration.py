@@ -275,8 +275,17 @@ class TVCalibration:
         corners_uv = np.stack([u_coords, v_coords], axis=1)  # (4, 2)
 
         W, H = self.canvas_size
+        # Depth-derived corners come in [TL, TR, BR, BL] order from
+        # `_assign_corners_TL_TR_BR_BL` (depth_processing.py). The canvas
+        # targets here are the destinations each one maps to:
+        #   depth TL → canvas TL = (0,   0)
+        #   depth TR → canvas BL = (0,   H)   ← swapped (was canvas TR)
+        #   depth BR → canvas BR = (W,   H)
+        #   depth BL → canvas TR = (W,   0)   ← swapped (was canvas BL)
+        # This is a diagonal flip across the TL–BR axis to match the
+        # operator's physical TV orientation.
         canvas_uv = np.array(
-            [[0.0, 0.0], [float(W), 0.0], [float(W), float(H)], [0.0, float(H)]],
+            [[0.0, 0.0], [0.0, float(H)], [float(W), float(H)], [float(W), 0.0]],
             dtype=np.float64,
         )
         try:
