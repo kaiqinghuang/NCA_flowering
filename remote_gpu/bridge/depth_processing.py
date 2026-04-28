@@ -189,7 +189,7 @@ def analyze_depth_frame(
     box_far_m: float = 0.45,
     surface_eps_m: float = 0.03,
     min_box_px: int = 80,
-    tip_extremum_pct: float = 5.0,
+    tip_extremum_pct: float = 3.0,
     noise_filter_px: int = 3,
 ) -> dict:
     """Analyze one depth frame; produce result + masks for the debug overlay.
