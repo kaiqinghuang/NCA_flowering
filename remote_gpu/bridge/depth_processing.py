@@ -10,9 +10,12 @@ Pipeline (per Kinect v2 depth frame, 512×424, millimeters):
        4-corner polygon — wood strips, floor, etc. are gone.
     4. Keep only the slab ``s ∈ [box_near_m, box_far_m]`` (the interaction
        volume "above" the screen). All remaining pixels are hand candidates.
-    5. **Fingertip = pixel with smallest s** (closest to the screen) inside
-       the box. We use the median of the K closest pixels (default 20) so
-       the result is robust to lone-pixel depth noise.
+    5. **Reduce that mask to its largest 8-connected component** = the hand
+       blob, throwing away scattered single-pixel specks caused by depth
+       jitter near the plane / polygon edges.
+    6. **Fingertip = pixel inside the hand blob with the smallest s**
+       (closest to the screen). We use the median of the K closest
+       pixels (default 20) so the result is robust to lone-pixel noise.
 
 This module also exposes ``auto_calibrate_tv_from_depth`` — a one-shot
 routine that fits the TV plane via RANSAC on a stack of depth frames,
@@ -98,6 +101,35 @@ def _empty_result() -> DepthHandResult:
     )
 
 
+def _largest_connected_component(mask: np.ndarray, min_size: int = 0) -> np.ndarray:
+    """Return a bool mask containing only the largest 8-connected component.
+
+    Used to isolate "the hand" inside the interaction-box mask: a real
+    hand forms one large blob, while depth jitter at the TV edge / plane
+    boundary leaves scattered single-pixel specks. Picking the largest CC
+    guarantees the fingertip search runs over hand pixels only.
+
+    Falls back to the input mask unchanged if OpenCV is unavailable.
+    Returns an all-False mask when no component meets ``min_size``.
+    """
+    if not mask.any():
+        return np.zeros_like(mask, dtype=bool)
+    try:
+        import cv2  # type: ignore
+    except ImportError:
+        return mask.astype(bool, copy=True)
+    n_lbl, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8,
+    )
+    if n_lbl <= 1:
+        return np.zeros_like(mask, dtype=bool)
+    sizes = stats[1:, cv2.CC_STAT_AREA]
+    best = int(np.argmax(sizes))
+    if int(sizes[best]) < min_size:
+        return np.zeros_like(mask, dtype=bool)
+    return labels == (best + 1)
+
+
 # ----------------------------------------------------------------------
 # Per-frame work — returns both the result and intermediate maps used by debug overlay
 # ----------------------------------------------------------------------
@@ -112,13 +144,21 @@ def analyze_depth_frame(
 ) -> dict:
     """Analyze one depth frame; produce result + masks for the debug overlay.
 
+    Fingertip detection: the in-box pixels are reduced to their largest
+    connected component (= the hand). Within that component we pick the
+    pixel closest to the TV plane (smallest signed distance ``s``); that
+    point is the fingertip. We report the median of the K smallest-s
+    pixels for sub-pixel jitter immunity.
+
     Returns a dict with:
         result      : DepthHandResult
         valid       : (H, W) bool
         s           : (H, W) signed distance to plane (NaN where invalid)
         in_polygon  : (H, W) bool — pixel projects inside the TV quad
         on_surface  : (H, W) bool — within ``surface_eps_m`` of plane AND in polygon
-        in_box      : (H, W) bool — slab ``[near, far]`` AND in polygon
+        in_box      : (H, W) bool — slab ``[near, far]`` AND in polygon (raw, may include noise specks)
+        hand_mask   : (H, W) bool — largest connected component of ``in_box`` (= the hand);
+                                    used for fingertip detection and the orange debug fill
     """
     dmm = np.asarray(depth_mm_flat, dtype=np.uint16).reshape(DEPTH_H, DEPTH_W)
     x, y, z_m, valid = _depth_to_xyz_full(dmm)
@@ -129,6 +169,7 @@ def analyze_depth_frame(
         "in_polygon": np.zeros((DEPTH_H, DEPTH_W), dtype=bool),
         "on_surface": np.zeros((DEPTH_H, DEPTH_W), dtype=bool),
         "in_box": np.zeros((DEPTH_H, DEPTH_W), dtype=bool),
+        "hand_mask": np.zeros((DEPTH_H, DEPTH_W), dtype=bool),
         "result": _empty_result(),
     }
 
@@ -172,15 +213,24 @@ def analyze_depth_frame(
     )
     out["in_box"] = in_box
 
-    n_box = int(np.count_nonzero(in_box))
-    if n_box < min_box_px:
+    # Reduce in_box to its largest 8-connected component → "the hand".
+    # This filters out scattered specks that survive `s >= box_near_m`
+    # because of depth jitter near the TV edge / plane boundary; without
+    # it those specks (closer to s=box_near_m than any real fingertip)
+    # would dominate the smallest-s pick below.
+    hand_mask = _largest_connected_component(in_box, min_size=min_box_px)
+    out["hand_mask"] = hand_mask
+
+    n_hand = int(np.count_nonzero(hand_mask))
+    if n_hand < min_box_px:
         return out
 
-    # Fingertip = closest-to-plane pixel (smallest s) inside the box.
-    # Robustness: use median of the K smallest-s pixels.
-    s_box = np.where(in_box, s, np.inf)
-    flat = s_box.ravel()
-    k = min(tip_neighbors, n_box)
+    # Fingertip = pixel inside the hand blob with the smallest signed
+    # distance to the TV plane (= deepest into the screen). Median of the
+    # K smallest-s pixels gives sub-pixel jitter immunity.
+    s_hand = np.where(hand_mask, s, np.inf)
+    flat = s_hand.ravel()
+    k = min(tip_neighbors, n_hand)
     if k <= 1:
         idx_min = int(np.argmin(flat))
         tv = idx_min // DEPTH_W
@@ -203,7 +253,7 @@ def analyze_depth_frame(
         tip_s = float(np.median(ss))
         debug_uv = (float(np.median(sel_u)), float(np.median(sel_v)))
 
-    confident = n_box >= max(min_box_px * 2, 200)
+    confident = n_hand >= max(min_box_px * 2, 200)
 
     out["result"] = DepthHandResult(
         tracked=True,
@@ -211,7 +261,7 @@ def analyze_depth_frame(
         tip_xyz=(tip_x, tip_y, tip_z),
         tip_signed_dist_m=tip_s,
         debug_uv_tip=debug_uv,
-        in_box_px=n_box,
+        in_box_px=n_hand,
     )
     return out
 
@@ -236,11 +286,13 @@ def render_depth_debug_bgr(
     * **Orange wireframe (4 top edges + 4 vertical struts)** = the 3D
       interaction box rising ``box_far_m`` above the TV plane → makes the
       detection volume obvious even when no hand is present.
-    * **Orange fill** = pixels currently inside the interaction box → when
-      a hand enters the slab its silhouette lights up orange.
+    * **Orange fill** = the hand silhouette inside the interaction box
+      (largest connected component of the slab mask, so noise specks
+      above the TV surface don't show up).
     * **Yellow circle** = SDK HandTipRight (when visible, useful during
       calibration).
-    * **White cross + ring** = the depth-derived fingertip used at runtime.
+    * **Red square (white border)** = the depth-derived fingertip — the
+      pixel inside the orange hand blob closest to the magenta plane.
     """
     try:
         import cv2
@@ -261,7 +313,12 @@ def render_depth_debug_bgr(
     n_box = 0
     if analysis is not None and tv_cal is not None and getattr(tv_cal, "ready", False):
         on_surface = analysis.get("on_surface")
-        in_box = analysis.get("in_box")
+        # Use the largest-CC hand mask if available (filters specks);
+        # fall back to the raw `in_box` only when the analysis predates
+        # the hand-mask field (older snapshots).
+        hand_mask = analysis.get("hand_mask")
+        if hand_mask is None:
+            hand_mask = analysis.get("in_box")
         if on_surface is not None and on_surface.shape == bgr.shape[:2]:
             n_surface = int(np.count_nonzero(on_surface))
             if n_surface > 0:
@@ -269,14 +326,15 @@ def render_depth_debug_bgr(
                 bf = bgr.astype(np.float32)
                 m = on_surface[:, :, None]
                 bgr = np.where(m, bf * 0.45 + mag * 0.55, bf).astype(np.uint8)
-        if in_box is not None and in_box.shape == bgr.shape[:2]:
-            n_box = int(np.count_nonzero(in_box))
+        if hand_mask is not None and hand_mask.shape == bgr.shape[:2]:
+            n_box = int(np.count_nonzero(hand_mask))
             if n_box > 0:
-                # Bright orange fill — when a hand enters the slab its
-                # silhouette lights up clearly (was a faint green before).
+                # Bright orange fill — the hand silhouette inside the
+                # interaction box (largest connected component of in_box,
+                # so noise specks above the TV surface don't show up).
                 orange = np.array([0.0, 165.0, 255.0], dtype=np.float32)  # BGR orange
                 bf = bgr.astype(np.float32)
-                m = in_box[:, :, None]
+                m = hand_mask[:, :, None]
                 bgr = np.where(m, bf * 0.30 + orange * 0.70, bf).astype(np.uint8)
 
         # ---- Magenta TV polygon outline (the actual screen surface) ----
@@ -360,7 +418,9 @@ def render_depth_debug_bgr(
         except Exception:  # noqa: BLE001
             pass
 
-    # Depth-derived fingertip (white)
+    # Depth-derived fingertip — small pure-red filled square at the
+    # closest-to-plane pixel inside the hand blob, with a thin white
+    # border so it stands out against the orange hand fill underneath.
     tracked = False
     conf = False
     tip_uv = (-1.0, -1.0)
@@ -373,8 +433,12 @@ def render_depth_debug_bgr(
     if tip_uv[0] >= 0 and tip_uv[1] >= 0:
         tu = int(np.clip(round(tip_uv[0]), 0, DEPTH_W - 1))
         tv = int(np.clip(round(tip_uv[1]), 0, DEPTH_H - 1))
-        cv2.drawMarker(bgr, (tu, tv), (255, 255, 255), markerType=cv2.MARKER_CROSS, markerSize=18, thickness=2)
-        cv2.circle(bgr, (tu, tv), 12, (255, 255, 255), 1, cv2.LINE_AA)
+        sq = 5  # half-size; final square is (2*sq + 1) px on a side
+        cv2.rectangle(bgr, (tu - sq, tv - sq), (tu + sq, tv + sq),
+                      (0, 0, 255), thickness=-1)             # filled pure red
+        cv2.rectangle(bgr, (tu - sq - 1, tv - sq - 1),
+                      (tu + sq + 1, tv + sq + 1),
+                      (255, 255, 255), thickness=1)          # white outline
 
     # Status text
     plane_ready = tv_cal is not None and getattr(tv_cal, "ready", False)
