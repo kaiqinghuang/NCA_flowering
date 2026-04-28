@@ -141,14 +141,23 @@ def analyze_depth_frame(
     surface_eps_m: float = 0.03,
     min_box_px: int = 80,
     tip_neighbors: int = 20,
+    noise_filter_px: int = 3,
 ) -> dict:
     """Analyze one depth frame; produce result + masks for the debug overlay.
 
-    Fingertip detection: the in-box pixels are reduced to their largest
-    connected component (= the hand). Within that component we pick the
-    pixel closest to the TV plane (smallest signed distance ``s``); that
-    point is the fingertip. We report the median of the K smallest-s
-    pixels for sub-pixel jitter immunity.
+    Fingertip detection pipeline:
+        1. ``in_box`` = pixels inside the calibrated TV quad whose signed
+           distance to the plane lies in ``[box_near_m, box_far_m]``.
+        2. ``in_box`` is morphologically opened with a small kernel
+           (``noise_filter_px``) — this both kills isolated single-pixel
+           specks and breaks ~1-pixel-wide filaments that connect the real
+           hand to nearby edge noise. Without this, those filaments make
+           the noise specks part of the hand's connected component, and
+           the smallest-``s`` median below gets pulled towards them.
+        3. The cleaned mask is reduced to its largest 8-connected
+           component → ``hand_mask`` (the actual hand silhouette).
+        4. Fingertip = median of the ``tip_neighbors`` smallest-``s``
+           pixels inside ``hand_mask`` (= deepest into the screen).
 
     Returns a dict with:
         result      : DepthHandResult
@@ -156,9 +165,10 @@ def analyze_depth_frame(
         s           : (H, W) signed distance to plane (NaN where invalid)
         in_polygon  : (H, W) bool — pixel projects inside the TV quad
         on_surface  : (H, W) bool — within ``surface_eps_m`` of plane AND in polygon
-        in_box      : (H, W) bool — slab ``[near, far]`` AND in polygon (raw, may include noise specks)
-        hand_mask   : (H, W) bool — largest connected component of ``in_box`` (= the hand);
-                                    used for fingertip detection and the orange debug fill
+        in_box      : (H, W) bool — raw slab mask (before noise filter); kept for
+                                    debugging — *not* used for the orange overlay
+        hand_mask   : (H, W) bool — cleaned + largest-CC of ``in_box`` (= the hand);
+                                    drives fingertip detection AND the orange debug fill
     """
     dmm = np.asarray(depth_mm_flat, dtype=np.uint16).reshape(DEPTH_H, DEPTH_W)
     x, y, z_m, valid = _depth_to_xyz_full(dmm)
@@ -213,12 +223,28 @@ def analyze_depth_frame(
     )
     out["in_box"] = in_box
 
-    # Reduce in_box to its largest 8-connected component → "the hand".
-    # This filters out scattered specks that survive `s >= box_near_m`
-    # because of depth jitter near the TV edge / plane boundary; without
-    # it those specks (closer to s=box_near_m than any real fingertip)
-    # would dominate the smallest-s pick below.
-    hand_mask = _largest_connected_component(in_box, min_size=min_box_px)
+    # Morphological open: erode then dilate with a small kernel.
+    #   * erode → kills isolated single-pixel specks and breaks the
+    #     ~1-px-wide "filaments" that connect the real hand to nearby
+    #     edge-jitter noise (this is the "diffusion noise" that pulls
+    #     the smallest-s median around)
+    #   * dilate → restores the main hand to ~original size, so the
+    #     fingertip itself is preserved
+    # The cleaned mask is then reduced to its largest 8-connected
+    # component → the actual hand silhouette.
+    in_box_clean = in_box
+    if noise_filter_px and noise_filter_px >= 2:
+        try:
+            import cv2  # type: ignore
+            k = int(noise_filter_px)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+            in_box_clean = cv2.morphologyEx(
+                in_box.astype(np.uint8), cv2.MORPH_OPEN, kernel,
+            ).astype(bool)
+        except ImportError:
+            pass
+
+    hand_mask = _largest_connected_component(in_box_clean, min_size=min_box_px)
     out["hand_mask"] = hand_mask
 
     n_hand = int(np.count_nonzero(hand_mask))
@@ -287,11 +313,9 @@ def render_depth_debug_bgr(
       interaction box rising ``box_far_m`` above the TV plane → makes the
       detection volume obvious even when no hand is present.
     * **Orange fill** = the hand silhouette inside the interaction box
-      (largest connected component of the slab mask, so noise specks
-      above the TV surface don't show up).
-    * **Yellow circle** = SDK HandTipRight (when visible, useful during
-      calibration).
-    * **Red square (white border)** = the depth-derived fingertip — the
+      (largest connected component of the cleaned slab mask, so noise
+      specks above the TV surface don't show up).
+    * **Red square (5×5 px)** = the depth-derived fingertip — the
       pixel inside the orange hand blob closest to the magenta plane.
     """
     try:
@@ -404,23 +428,8 @@ def render_depth_debug_bgr(
         except Exception:  # noqa: BLE001
             pass
 
-    # SDK HandTipRight marker (if available) — useful during calibration
-    if body_tip_xyz is not None:
-        try:
-            bx, by, bz = body_tip_xyz
-            if bz > 0.05:
-                u_px = DEPTH_CX + (bx * DEPTH_FX) / bz
-                v_px = DEPTH_CY + (by * DEPTH_FY) / bz
-                ui, vi = int(round(u_px)), int(round(v_px))
-                if 0 <= ui < DEPTH_W and 0 <= vi < DEPTH_H:
-                    cv2.circle(bgr, (ui, vi), 8, (0, 220, 255), 2, cv2.LINE_AA)
-                    cv2.drawMarker(bgr, (ui, vi), (0, 220, 255), markerType=cv2.MARKER_TILTED_CROSS, markerSize=14, thickness=2)
-        except Exception:  # noqa: BLE001
-            pass
-
     # Depth-derived fingertip — small pure-red filled square at the
-    # closest-to-plane pixel inside the hand blob, with a thin white
-    # border so it stands out against the orange hand fill underneath.
+    # closest-to-plane pixel inside the hand blob.
     tracked = False
     conf = False
     tip_uv = (-1.0, -1.0)
@@ -433,9 +442,9 @@ def render_depth_debug_bgr(
     if tip_uv[0] >= 0 and tip_uv[1] >= 0:
         tu = int(np.clip(round(tip_uv[0]), 0, DEPTH_W - 1))
         tv = int(np.clip(round(tip_uv[1]), 0, DEPTH_H - 1))
-        sq = 3  # half-size; final square is (2*sq + 1) px on a side
+        sq = 2  # half-size; final square is (2*sq + 1) = 5 px on a side
         cv2.rectangle(bgr, (tu - sq, tv - sq), (tu + sq, tv + sq),
-                      (0, 0, 255), thickness=-1)          # white outline
+                      (0, 0, 255), thickness=-1)
 
     # Status text
     plane_ready = tv_cal is not None and getattr(tv_cal, "ready", False)

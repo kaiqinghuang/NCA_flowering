@@ -55,6 +55,13 @@ class KinectDepthSource:
             if surface_eps_m is not None
             else float(os.environ.get("BRIDGE_DEBUG_SURFACE_EPS_M", "0.03"))
         )
+        # Morph-open kernel size used to clean the in-box mask before the
+        # largest-CC pass — kills 1-px specks and breaks thin filaments
+        # that would otherwise glue noise blobs onto the real hand and
+        # destabilize the smallest-s fingertip pick. 0/1 disables it.
+        self._noise_filter_px = int(
+            os.environ.get("BRIDGE_DEBUG_NOISE_FILTER_PX", "3")
+        )
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self.started_ok = False
@@ -213,6 +220,7 @@ class KinectDepthSource:
                 box_near_m=self.box_near_m,
                 box_far_m=self.box_far_m,
                 surface_eps_m=self._surface_eps_m,
+                noise_filter_px=self._noise_filter_px,
             )
 
             with self._body_lock:

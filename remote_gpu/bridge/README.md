@@ -161,9 +161,8 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | **magenta polygon outline** | the 4 auto-derived corners projected to the depth image — should hug the actual TV |
 | **magenta fill** | depth pixels within `BRIDGE_DEBUG_SURFACE_EPS_M` of the fitted plane *and* inside the polygon |
 | **orange wireframe** | the 3D interaction box: 4 top edges + 4 vertical struts rising `BRIDGE_DEPTH_BAND_MAX_M` above the TV plane. Always visible; shows where the detection volume sits in space |
-| **orange fill** | depth pixels currently inside the slab `[BRIDGE_DEPTH_BAND_MIN_M, BRIDGE_DEPTH_BAND_MAX_M]` *and* inside the polygon — i.e. the hand silhouette while a hand is in the box |
-| **yellow circle** | live SDK `HandTipRight` (visual reference only — no longer used for calibration) |
-| **white cross + ring** | the depth-derived fingertip used at runtime (closest-to-plane median of the K nearest pixels) |
+| **orange fill** | the **cleaned hand silhouette**: in-box pixels are first morph-opened with a `BRIDGE_DEBUG_NOISE_FILTER_PX` kernel (kills speckle / edge filaments) and then reduced to the largest connected component, so only the real hand shows up |
+| **red square (5×5 px)** | the depth-derived fingertip used at runtime — pixel inside the orange hand blob with the smallest signed distance to the TV plane (median of the K nearest pixels) |
 
 ## Tuning (env vars)
 
@@ -176,6 +175,7 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_DEPTH_BAND_MIN_M` | `0.02` | near edge of the interaction box (m above plane) |
 | `BRIDGE_DEPTH_BAND_MAX_M` | `0.45` | far edge of the interaction box (m above plane) |
 | `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
+| `BRIDGE_DEBUG_NOISE_FILTER_PX` | `3` | morph-open kernel (px) applied to the in-box mask before largest-CC. Stabilizes the fingertip pick by stripping single-pixel specks and ~1-px filaments that connect the hand to edge noise. Set to `0` or `1` to disable |
 | `BRIDGE_AUTOFIT_EPS_M` | `0.015` | on-plane tolerance during auto-calibration |
 | `BRIDGE_AUTOFIT_OPEN_PX` | `3` | morph-open kernel (px) on the on-plane mask |
 | `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
