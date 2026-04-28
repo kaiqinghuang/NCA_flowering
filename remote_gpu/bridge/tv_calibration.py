@@ -39,15 +39,15 @@ CORNER_LABELS: Tuple[str, str, str, str] = ("A", "B", "C", "D")
 
 # Mapping from canvas-corner index → bridge-detected (A/B/C/D) index.
 # Read it as: "for canvas position [TL, TR, BR, BL], take detected corner
-# at index ..." e.g. (0, 3, 2, 1) means:
-#     canvas TL ← detected[0] = A  (front-left)
-#     canvas TR ← detected[3] = D  (back-left)
-#     canvas BR ← detected[2] = C  (back-right)
-#     canvas BL ← detected[1] = B  (front-right)
-# i.e. the user-defined mapping  A→TL, D→TR, C→BR, B→BL.
+# at index ..." e.g. (3, 0, 1, 2) means:
+#     canvas TL ← detected[3] = D  (back-left)
+#     canvas TR ← detected[0] = A  (front-left)
+#     canvas BR ← detected[1] = B  (front-right)
+#     canvas BL ← detected[2] = C  (back-right)
+# i.e. the user-defined mapping  D→TL, A→TR, B→BR, C→BL.
 # Edit this single tuple to relabel/rotate/mirror the canvas mapping
 # without touching anything else in the calibration pipeline.
-CANVAS_TO_ABCD_INDEX: Tuple[int, int, int, int] = (0, 3, 2, 1)
+CANVAS_TO_ABCD_INDEX: Tuple[int, int, int, int] = (3, 0, 1, 2)
 
 
 @dataclass
