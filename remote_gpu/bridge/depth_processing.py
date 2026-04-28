@@ -433,12 +433,9 @@ def render_depth_debug_bgr(
     if tip_uv[0] >= 0 and tip_uv[1] >= 0:
         tu = int(np.clip(round(tip_uv[0]), 0, DEPTH_W - 1))
         tv = int(np.clip(round(tip_uv[1]), 0, DEPTH_H - 1))
-        sq = 5  # half-size; final square is (2*sq + 1) px on a side
+        sq = 3  # half-size; final square is (2*sq + 1) px on a side
         cv2.rectangle(bgr, (tu - sq, tv - sq), (tu + sq, tv + sq),
-                      (0, 0, 255), thickness=-1)             # filled pure red
-        cv2.rectangle(bgr, (tu - sq - 1, tv - sq - 1),
-                      (tu + sq + 1, tv + sq + 1),
-                      (255, 255, 255), thickness=1)          # white outline
+                      (0, 0, 255), thickness=-1)          # white outline
 
     # Status text
     plane_ready = tv_cal is not None and getattr(tv_cal, "ready", False)
