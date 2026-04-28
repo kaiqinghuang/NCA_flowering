@@ -59,6 +59,23 @@
   #calOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
                 pointer-events: none; font-family: monospace; z-index: 10; }
   #calOverlay.hidden { display: none; }
+
+  /* Canvas corner labels — pin TL/TR/BR/BL badges to the four canvas corners
+     so the operator can verify the bridge's auto-calibration mapping
+     (depth debug shows TL/TR/BR/BL in magenta; these match by colour + text). */
+  .corner-label { position: absolute; padding: 3px 7px;
+                  font-family: monospace; font-size: 11px; font-weight: 700;
+                  color: #fff; background: rgba(255, 0, 255, 0.85);
+                  border: 1px solid rgba(255, 255, 255, 0.75);
+                  border-radius: 4px;
+                  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+                  line-height: 1; letter-spacing: 0.5px;
+                  z-index: 5; pointer-events: none; user-select: none; }
+  .corner-label.hidden { display: none; }
+  .corner-label.corner-tl { top: 6px;    left: 6px; }
+  .corner-label.corner-tr { top: 6px;    right: 6px; }
+  .corner-label.corner-br { bottom: 6px; right: 6px; }
+  .corner-label.corner-bl { bottom: 6px; left: 6px; }
   .cal-target { position: absolute; width: 28px; height: 28px;
                 border: 2px solid rgba(255,255,255,0.9); border-radius: 50%;
                 transform: translate(-50%, -50%);
@@ -184,10 +201,14 @@
       <div class="row" style="gap:6px; margin-top:8px;">
         <button class="btn" id="kDebugToggleBtn" style="flex:1;">Debug View: Off</button>
       </div>
+      <div class="row" style="gap:6px; margin-top:6px;">
+        <button class="btn" id="cornerLabelsToggleBtn" style="flex:1;">Canvas Corners: On</button>
+      </div>
       <div id="kDebugWrap" class="k-debug-wrap hidden">
         <div class="k-debug-feed-label">
           Depth — magenta polygon = calibrated TV; magenta fill = pixels on plane;
-          green = interaction box; yellow = SDK HandTipRight; white = depth fingertip
+          orange wireframe = interaction box; orange fill = hand in box;
+          yellow = SDK HandTipRight; white = depth fingertip
         </div>
         <div class="k-debug-stage k-debug-stage-depth">
           <img id="kinectDebugDepthImg" alt="depth debug stream">
@@ -266,6 +287,10 @@
       <canvas id="canvas"></canvas>
       <canvas id="overlayCanvas"></canvas>
       <div id="calOverlay" class="hidden"></div>
+      <div class="corner-label corner-tl" id="cornerLabelTL">TL</div>
+      <div class="corner-label corner-tr" id="cornerLabelTR">TR</div>
+      <div class="corner-label corner-br" id="cornerLabelBR">BR</div>
+      <div class="corner-label corner-bl" id="cornerLabelBL">BL</div>
     </div>
     <div id="info">no frames yet</div>
     <div class="help">
@@ -799,6 +824,14 @@ var kDebugWrap = document.getElementById('kDebugWrap');
 var kinectDebugDepthImg = document.getElementById('kinectDebugDepthImg');
 var kinectDebugStats = document.getElementById('kinectDebugStats');
 var kDebugEnabled = false;
+var cornerLabelsBtn = document.getElementById('cornerLabelsToggleBtn');
+var cornerLabelEls = [
+  document.getElementById('cornerLabelTL'),
+  document.getElementById('cornerLabelTR'),
+  document.getElementById('cornerLabelBR'),
+  document.getElementById('cornerLabelBL'),
+];
+var cornerLabelsVisible = true;
 var kDebugDepthInflight = false;
 var kDebugDepthBaseUrl = '';
 var kDebugDepthTimer = null;
@@ -1204,6 +1237,29 @@ if (tvCalResetBtn) tvCalResetBtn.onclick = function() {
   if (confirm('Clear stored TV calibration?')) sendBridge({ op: 'tv_calib_reset' });
 };
 if (kDebugToggleBtn) kDebugToggleBtn.onclick = function() { setKDebugEnabled(!kDebugEnabled); };
+
+// --- Canvas corner labels (TL/TR/BR/BL) ---
+function setCornerLabelsVisible(on) {
+  cornerLabelsVisible = !!on;
+  for (var i = 0; i < cornerLabelEls.length; i++) {
+    var el = cornerLabelEls[i];
+    if (el) el.classList.toggle('hidden', !cornerLabelsVisible);
+  }
+  if (cornerLabelsBtn) {
+    cornerLabelsBtn.textContent = 'Canvas Corners: ' + (cornerLabelsVisible ? 'On' : 'Off');
+  }
+  try { localStorage.setItem('canvasCornerLabels', cornerLabelsVisible ? '1' : '0'); }
+  catch (e) {}
+}
+if (cornerLabelsBtn) {
+  cornerLabelsBtn.onclick = function() { setCornerLabelsVisible(!cornerLabelsVisible); };
+}
+try {
+  var savedCornerLabels = localStorage.getItem('canvasCornerLabels');
+  setCornerLabelsVisible(savedCornerLabels === null ? true : savedCornerLabels === '1');
+} catch (e) {
+  setCornerLabelsVisible(true);
+}
 
 // Initial overlay sizing + kick off bridge connection.
 resizeOverlayCanvas();
