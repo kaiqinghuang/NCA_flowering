@@ -1,21 +1,28 @@
 """4-corner TV calibration: SDK HandTipRight 3D points → TV plane + canvas homography.
 
 Replaces the old separate `Calibration` (canvas pinch corners) and
-`PlaneCalibration` (auto RANSAC plane). One pass of 4 manually-confirmed
-corners (A → B → C → D, clockwise from the front-left) gives us:
+`PlaneCalibration` (auto RANSAC plane). One pass of 4 detected corners
+(A → B → C → D, clockwise from the front-left in camera space) gives us:
 
     1. The TV plane (least-squares fit of the 4 captured 3D points).
-    2. A right-handed orthonormal basis (origin = A, u along A→B,
-       v along A→D projected onto the plane).
+    2. A right-handed orthonormal basis on the plane.
     3. The polygon (4 corners) projected to that 2D basis — used to
        restrict depth-mode segmentation to "above the TV" only.
     4. A 3x3 homography from plane-local (u, v) to canvas (cx, cy).
 
-The 4 corner labels A/B/C/D map to canvas position TL/TR/BR/BL:
-    A = front-left  (smaller Z, smaller X) → canvas top-left
-    B = front-right (smaller Z, larger  X) → canvas top-right
-    C = back-right  (larger  Z, larger  X) → canvas bottom-right
-    D = back-left   (larger  Z, smaller X) → canvas bottom-left
+Two distinct labellings exist on purpose:
+
+    * **A/B/C/D** = how the bridge labels the 4 detected TV corners by
+      their physical position in camera space (clockwise from the
+      front-left). Used by the depth debug overlay so each magenta dot
+      is tagged with where it physically is on the TV.
+
+    * **TL/TR/BR/BL** = the four canvas corners. Used by the basis /
+      homography fit and by the canvas-side overlay.
+
+The mapping between the two is configured by `CANVAS_TO_ABCD_INDEX`
+below and applied once inside `commit_auto`. Change that constant when
+the physical TV is rotated / mirrored relative to the canvas.
 
 Persisted to `tv_calibration.json` next to this module.
 """
@@ -30,6 +37,18 @@ import numpy as np
 
 
 CORNER_LABELS: Tuple[str, str, str, str] = ("A", "B", "C", "D")
+
+# Mapping from canvas-corner index → bridge-detected (A/B/C/D) index.
+# Read it as: "for canvas position [TL, TR, BR, BL], take detected corner
+# at index ..." e.g. (0, 3, 2, 1) means:
+#     canvas TL ← detected[0] = A  (front-left)
+#     canvas TR ← detected[3] = D  (back-left)
+#     canvas BR ← detected[2] = C  (back-right)
+#     canvas BL ← detected[1] = B  (front-right)
+# i.e. the user-defined mapping  A→TL, D→TR, C→BR, B→BL.
+# Edit this single tuple to relabel/rotate/mirror the canvas mapping
+# without touching anything else in the calibration pipeline.
+CANVAS_TO_ABCD_INDEX: Tuple[int, int, int, int] = (0, 3, 2, 1)
 
 
 @dataclass
@@ -223,33 +242,56 @@ class TVCalibration:
 
         ``corners_abcd`` must be a sequence of 4 (x, y, z) points
         already ordered as A, B, C, D in camera space (front-left,
-        front-right, back-right, back-left). We re-fit the plane with
-        SVD on those 4 points (so the plane stays consistent with the
-        corners), then run the same finalisation as the manual wizard
-        (basis, polygon (u, v), homography → canvas).
+        front-right, back-right, back-left).
+
+        We then:
+          1. Reorder them into canvas position order (TL, TR, BR, BL)
+             via ``CANVAS_TO_ABCD_INDEX`` and feed that to ``_finalize``
+             so the basis / homography are fit against the canvas layout.
+          2. After ``_finalize`` succeeds, restore ``self.corners_3d``
+             back to the original A/B/C/D detection order so the depth
+             debug overlay can label each magenta dot with where it
+             physically is on the TV (independent of the canvas mapping).
         """
         seq = list(corners_abcd)
         if len(seq) != 4:
             return TVCalibrationResult(False, "auto-commit needs exactly 4 corners")
         try:
-            self.captured = [
+            seq_abcd = [
                 (float(c[0]), float(c[1]), float(c[2])) for c in seq
             ]
         except Exception as e:  # noqa: BLE001
             return TVCalibrationResult(False, f"auto-commit bad corner format: {e}")
+        # Detection (A/B/C/D) → canvas (TL/TR/BR/BL) remap. _finalize
+        # assumes self.captured[0..3] = TL, TR, BR, BL (canvas order).
+        try:
+            seq_canvas = [seq_abcd[i] for i in CANVAS_TO_ABCD_INDEX]
+        except Exception as e:  # noqa: BLE001
+            return TVCalibrationResult(False, f"corner remap failed: {e}")
         # Reset wizard state — auto-commit is one-shot.
         self.mode = "idle"
         self.current_corner = 0
+        self.captured = seq_canvas
         res = self._finalize()
-        if not res.ok:
-            self.captured = []
-        else:
-            # _finalize already cleared self.captured? No, only the wizard does.
-            self.captured = []
+        self.captured = []
+        if res.ok:
+            # _finalize stored corners_3d in canvas order (= seq_canvas).
+            # Override it back to A/B/C/D detection order so the depth
+            # debug overlay labels physical TV positions correctly. The
+            # basis / homography we just fit are unaffected (they were
+            # built from seq_canvas and persist as basis_origin/u/v + M).
+            self.corners_3d = seq_abcd
+            self.save()  # re-persist with detection-ordered corners_3d
         return res
 
     # -------- finalization (4 corners → plane + basis + homography) --------
     def _finalize(self) -> TVCalibrationResult:
+        """Fit plane + (u, v) basis + homography from ``self.captured``.
+
+        IMPORTANT: ``self.captured`` is expected here in **canvas position
+        order** [TL, TR, BR, BL]. The detection-time A/B/C/D order is
+        already remapped by ``commit_auto`` before this is called.
+        """
         if len(self.captured) != 4:
             return TVCalibrationResult(False, "need exactly 4 corners")
 
@@ -259,20 +301,20 @@ class TVCalibration:
 
         n = np.array([plane.a, plane.b, plane.c], dtype=np.float64)
         proj = np.stack([_project_to_plane(np.asarray(p, dtype=np.float64), plane)
-                         for p in self.captured])  # (4, 3)
+                         for p in self.captured])  # (4, 3) in [TL, TR, BR, BL] order
         origin = proj[0].copy()
-        u_dir_raw = proj[1] - proj[0]  # A → B
+        u_dir_raw = proj[1] - proj[0]  # TL → TR (canvas +x direction)
         u_dir_raw -= n * np.dot(u_dir_raw, n)
         u_norm = float(np.linalg.norm(u_dir_raw))
         if u_norm < 1e-6:
-            return TVCalibrationResult(False, "A→B direction is degenerate")
+            return TVCalibrationResult(False, "TL→TR direction is degenerate")
         u_basis = u_dir_raw / u_norm
         v_basis = np.cross(n, u_basis)
         vn = float(np.linalg.norm(v_basis))
         if vn < 1e-9:
             return TVCalibrationResult(False, "v basis degenerate")
         v_basis /= vn
-        # Make sure v_basis points A → D (canvas +y).
+        # Make sure v_basis points TL → BL (canvas +y direction).
         if np.dot(proj[3] - proj[0], v_basis) < 0:
             v_basis = -v_basis
 
