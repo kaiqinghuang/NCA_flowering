@@ -374,7 +374,12 @@ class KinectDepthSource:
                 # touching code (matches knobs documented in README.md).
                 eps_m = float(os.environ.get("BRIDGE_AUTOFIT_EPS_M", "0.015"))
                 open_px = int(os.environ.get("BRIDGE_AUTOFIT_OPEN_PX", "3"))
+                color_mode = os.environ.get("BRIDGE_AUTOFIT_COLOR_MODE", "reject_yellow").strip()
                 color_max_v = float(os.environ.get("BRIDGE_AUTOFIT_COLOR_MAX_V", "90"))
+                yellow_h_min = float(os.environ.get("BRIDGE_AUTOFIT_YELLOW_H_MIN", "10"))
+                yellow_h_max = float(os.environ.get("BRIDGE_AUTOFIT_YELLOW_H_MAX", "40"))
+                yellow_s_min = float(os.environ.get("BRIDGE_AUTOFIT_YELLOW_S_MIN", "40"))
+                yellow_v_min = float(os.environ.get("BRIDGE_AUTOFIT_YELLOW_V_MIN", "50"))
                 color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
                 # Defaults: AD/BC/back = 0, front = 1.5% (bezel on camera side).
                 trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "0"))
@@ -392,7 +397,12 @@ class KinectDepthSource:
                     depth_to_color_xy=depth_to_color_xy if color_enable else None,
                     on_plane_eps_m=eps_m,
                     morph_open_px=open_px,
+                    color_mode=color_mode,
                     color_max_v=color_max_v,
+                    color_yellow_h_min=yellow_h_min,
+                    color_yellow_h_max=yellow_h_max,
+                    color_yellow_s_min=yellow_s_min,
+                    color_yellow_v_min=yellow_v_min,
                     color_close_px=color_close_px,
                     trim_pct=trim_pct,
                     trim_pct_front=trim_front,
@@ -417,10 +427,20 @@ class KinectDepthSource:
             color_info = result.get("color_info") or {}
             color_log = ""
             if color_info.get("color_refined"):
+                fmode = color_info.get("filter_mode", "?")
+                fparam = color_info.get("filter_param") or {}
+                if fmode == "reject_yellow":
+                    detail = (
+                        f"yellow H[{fparam.get('h_min', 0):.0f}-{fparam.get('h_max', 0):.0f}]"
+                        f" S≥{fparam.get('s_min', 0):.0f} V≥{fparam.get('v_min', 0):.0f}"
+                        f", flagged {fparam.get('n_yellow', 0)}px"
+                    )
+                else:
+                    detail = f"max V={fparam.get('max_v', 0):.0f}"
                 color_log = (
-                    f"  color: {color_info.get('n_blob_before', 0)}→"
+                    f"  color[{fmode}]: {color_info.get('n_blob_before', 0)}→"
                     f"{color_info.get('n_after_largest_cc', 0)}px "
-                    f"(removed {color_info.get('removed_pct', 0.0):.1f}% as bright)"
+                    f"(removed {color_info.get('removed_pct', 0.0):.1f}%; {detail})"
                 )
             elif color_info:
                 color_log = f"  color: skipped ({color_info.get('reason', '?')})"

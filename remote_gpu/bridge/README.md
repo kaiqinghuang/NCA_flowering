@@ -91,9 +91,17 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
 1. Make sure the **TV screen is fully visible** to the Kinect, and
    **clear hands / people** out of the depth view (so the largest
    co-planar blob really is the TV).
-2. Make sure the TV screen is **black or showing dark content**
-   during calibration (the algorithm uses the screen's near-zero
-   brightness to distinguish it from any surrounding wood/bezel).
+2. The colour pass distinguishes the TV from any surrounding wood/
+   bezel. Two modes are available (env `BRIDGE_AUTOFIT_COLOR_MODE`):
+   * **`reject_yellow`** (default) — discards pixels whose hue lands
+     in the wood/bezel yellow band. Use this when the TV isn't
+     particularly dark or has visible reflections — the wood frame's
+     hue (yellow / orange-brown) is far more reliable than the
+     screen's brightness.
+   * **`dark`** (legacy) — keeps only near-black pixels (controlled
+     by `BRIDGE_AUTOFIT_COLOR_MAX_V`). Best when the screen is
+     clearly the darkest co-planar surface in view; in that case
+     have the TV display fully black content during calibration.
 3. Click **Auto-Calibrate TV (Depth)**.
 4. The bridge captures ~1.5 s of depth + 1 colour frame, then:
    * RANSAC-fits the dominant 3D plane,
@@ -103,11 +111,8 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
    * picks the **largest connected component** as the depth-only
      candidate blob,
    * **uses the SDK `CoordinateMapper` to project every blob pixel
-     into the colour frame** and discards anything brighter than
-     `BRIDGE_AUTOFIT_COLOR_MAX_V` (default `90`). Wood/bezel survive
-     the depth pipeline because they sit on the TV plane, but they
-     are visibly bright while the powered-off TV is near-black —
-     this single test cleanly removes them.
+     into the colour frame** and applies the colour filter selected
+     above (`reject_yellow` or `dark`).
    * Closes pinholes (`BRIDGE_AUTOFIT_COLOR_CLOSE_PX`) and takes the
      largest CC again as the final TV mask,
    * Projects the colour-refined blob to the plane (u, v) and runs a
@@ -129,17 +134,33 @@ Open the NCA page and connect to the bridge. In the **Kinect** sidebar:
    * SVD-refits the plane on the 4 sorted corners and solves the
      homography to the canvas. Result saved to `tv_calibration.json`.
 
-The status bar will show e.g. `color: 8214→5103px (removed 37.9% as
-bright)`, telling you exactly how much of the depth blob was wood/bezel.
+The status bar shows the filter mode plus per-mode details, e.g.:
+* `color[reject_yellow]: 8214→5103px (rejected 3111px as yellow H[10–40] S≥60 V≥50)`
+* `color[dark]: 8214→5103px (removed 37.9% as bright, max V=90)`
 
 **Tuning the colour pass:**
+
+In `reject_yellow` mode (default):
+* If wood/bezel is still inside the rect → widen the yellow band:
+  drop `BRIDGE_AUTOFIT_YELLOW_H_MIN` (e.g. `10 → 5`) or raise
+  `BRIDGE_AUTOFIT_YELLOW_H_MAX` (e.g. `40 → 50`); or lower
+  `BRIDGE_AUTOFIT_YELLOW_S_MIN` (e.g. `60 → 40`) so paler-coloured
+  wood also gets rejected.
+* If too much of the TV is being rejected (status shows the algorithm
+  fell back to depth-only) → narrow the band: raise
+  `BRIDGE_AUTOFIT_YELLOW_S_MIN` and/or `BRIDGE_AUTOFIT_YELLOW_V_MIN`
+  so only confidently-saturated wood is dropped.
+* If the TV screen itself shows yellow content during calibration,
+  switch to `BRIDGE_AUTOFIT_COLOR_MODE=dark` instead.
+
+In `dark` mode:
 * If wood/bezel is still inside the rect → lower
   `BRIDGE_AUTOFIT_COLOR_MAX_V` (e.g. `90 → 60`).
-* If too much of the TV is being eaten (status shows the algorithm fell
-  back to depth-only because `<2 %` survived) → raise it (`90 → 130`)
-  or check that the TV is actually showing dark content.
-* To disable the colour pass entirely (e.g. debugging): set
-  `BRIDGE_AUTOFIT_COLOR_ENABLE=0`.
+* If too much of the TV is being eaten → raise it (`90 → 130`) or check
+  that the TV is actually showing dark content.
+
+To disable the colour pass entirely (e.g. debugging): set
+`BRIDGE_AUTOFIT_COLOR_ENABLE=0`.
 
 **Tuning the rectangle fit:**
 * The PCA fit applies percentile trim **independently** on each logical
@@ -188,7 +209,12 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_AUTOFIT_EPS_M` | `0.015` | on-plane tolerance during auto-calibration |
 | `BRIDGE_AUTOFIT_OPEN_PX` | `3` | morph-open kernel (px) on the on-plane mask |
 | `BRIDGE_AUTOFIT_COLOR_ENABLE` | `1` | `0` disables the RGB refine pass (depth-only fit) |
-| `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | max brightness (max(B,G,R), 0–255) to count as TV-black |
+| `BRIDGE_AUTOFIT_COLOR_MODE` | `reject_yellow` | which colour filter to apply on the depth blob: `reject_yellow` (drop wood-coloured pixels, default) or `dark` (legacy: keep near-black pixels only) |
+| `BRIDGE_AUTOFIT_COLOR_MAX_V` | `90` | [`dark` mode] max brightness (`max(B,G,R)`, 0–255) to count as TV-black |
+| `BRIDGE_AUTOFIT_YELLOW_H_MIN` | `10` | [`reject_yellow`] lower bound of the wood-yellow hue band on OpenCV's H scale (0–180, where 30 ≈ yellow, 15 ≈ orange-brown) |
+| `BRIDGE_AUTOFIT_YELLOW_H_MAX` | `40` | [`reject_yellow`] upper bound of the wood-yellow hue band |
+| `BRIDGE_AUTOFIT_YELLOW_S_MIN` | `60` | [`reject_yellow`] minimum HSV saturation for a pixel to count as "wood". Below this it is considered too grey to confidently classify, so it is kept |
+| `BRIDGE_AUTOFIT_YELLOW_V_MIN` | `50` | [`reject_yellow`] minimum HSV value (brightness) for a pixel to count as "wood". Avoids dropping deep shadows that happen to land in the yellow hue band |
 | `BRIDGE_AUTOFIT_COLOR_CLOSE_PX` | `3` | morph-close kernel (px) on the colour-refined mask |
 | `BRIDGE_AUTOFIT_TRIM_PCT` | `0` | default percentile trim for **front**, **back**, **AD**, and **BC** when the corresponding override env is unset (empty). `0` = no trim on that knob's inherited axis |
 | `BRIDGE_AUTOFIT_TRIM_FRONT_PCT` | `1.5` | trim on the **front** edge (smaller camera Z along the front-back PCA axis). Empty ⇒ inherit `TRIM_PCT` |

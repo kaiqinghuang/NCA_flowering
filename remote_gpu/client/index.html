@@ -1013,7 +1013,19 @@ function describeAutoCalResult(m) {
       var before = ci.n_blob_before || 0;
       var after = ci.n_after_largest_cc || 0;
       var pct = (typeof ci.removed_pct === 'number') ? ci.removed_pct.toFixed(1) : '?';
-      s += ' · color: ' + before + '→' + after + 'px (removed ' + pct + '% as bright, max V=' + (ci.max_v_used || '?') + ')';
+      var fmode = ci.filter_mode || 'color';
+      var fparam = ci.filter_param || {};
+      var detail;
+      if (fmode === 'reject_yellow') {
+        var hMin = fparam.h_min, hMax = fparam.h_max;
+        var sMin = fparam.s_min, vMin = fparam.v_min;
+        var nY = (typeof fparam.n_yellow === 'number') ? fparam.n_yellow : 0;
+        detail = 'rejected ' + nY + 'px as yellow H[' + hMin + '–' + hMax + '] S≥' + sMin + ' V≥' + vMin;
+      } else {
+        var maxV = (typeof fparam.max_v === 'number') ? fparam.max_v : '?';
+        detail = 'removed ' + pct + '% as bright, max V=' + maxV;
+      }
+      s += ' · color[' + fmode + ']: ' + before + '→' + after + 'px (' + detail + ')';
     } else if (ci.reason) {
       s += ' · color: skipped (' + ci.reason + ')';
     }

@@ -561,21 +561,36 @@ def _refine_blob_with_color(
     blob_mask_depth: np.ndarray,
     depth_to_color_xy: np.ndarray,
     color_bgr: np.ndarray,
-    max_v: float,
     morph_close_px: int,
     cv2_mod,
+    *,
+    mode: str = "reject_yellow",
+    max_v: float = 90.0,
+    yellow_h_min: float = 10.0,
+    yellow_h_max: float = 40.0,
+    yellow_s_min: float = 40.0,
+    yellow_v_min: float = 50.0,
 ) -> Tuple[np.ndarray, dict]:
     """Refine a depth-derived blob mask using the corresponding RGB pixels.
 
     Co-planar non-screen structures (wood slats, bezel ornaments, …)
     survive the depth-only pipeline because they sit *on* the TV plane.
-    But visually they are bright/saturated, while the powered-off (or
-    dark-content) TV screen is near-black. We exploit that asymmetry:
+    Two filter modes exploit the colour difference between them and the
+    screen.
 
-        for each depth pixel in the blob:
-            (cx, cy) = SDK CoordinateMapper(depth pixel)        # done by caller
-            sample color_bgr[cy, cx]
-            keep the depth pixel iff  max(B, G, R) ≤ max_v
+    ``mode="dark"`` (legacy):
+        keep depth pixels whose colour is near-black —
+        ``max(B, G, R) ≤ max_v``. Works only when the screen is
+        clearly the darkest co-planar surface in view.
+
+    ``mode="reject_yellow"`` (default):
+        REJECT depth pixels whose HSV colour is "yellow-ish wood":
+        ``yellow_h_min ≤ H ≤ yellow_h_max`` AND ``S ≥ yellow_s_min``
+        AND ``V ≥ yellow_v_min``. Keep everything else. This handles
+        TVs that are not particularly dark and/or have visible
+        reflections — the wooden frame's hue is far more reliable
+        than the screen's brightness. Uses OpenCV's HSV scale
+        (H ∈ [0, 180], S/V ∈ [0, 255]).
 
     A small morphological close fills speckle holes from screen
     reflections / interpolation noise, then we keep only the largest
@@ -589,12 +604,22 @@ def _refine_blob_with_color(
                             Invalid mappings are encoded as ±inf.
         color_bgr:          (Hc, Wc, 3) uint8 BGR — the colour frame
                             captured at the same instant.
-        max_v:              maximum brightness (0–255) to count as "TV".
-                            Wood and bezels are brighter than this.
         morph_close_px:     square kernel size for closing pinholes in
                             the kept mask (px in depth space). 0 = off.
         cv2_mod:            the imported ``cv2`` module (passed in to
                             avoid re-importing it inside this hot path).
+        mode:               filter mode (see above).
+        max_v:              [dark mode] maximum brightness (0–255).
+        yellow_h_min/max:   [reject_yellow] hue band classified as "wood"
+                            on OpenCV's H scale (0–180; yellow ≈ 30,
+                            orange-brown ≈ 15).
+        yellow_s_min:       [reject_yellow] minimum saturation for a
+                            pixel to count as "wood". Low saturation
+                            ⇒ near-grey ⇒ probably NOT wood, keep it.
+        yellow_v_min:       [reject_yellow] minimum value for a pixel
+                            to count as "wood". Avoids filtering deep
+                            shadows that happen to land in the yellow
+                            hue band.
 
     Returns:
         refined_mask:  (DEPTH_H, DEPTH_W) bool, after color filter +
@@ -635,25 +660,56 @@ def _refine_blob_with_color(
     cx_v = cx[valid].astype(np.int32)
     cy_v = cy[valid].astype(np.int32)
     bgr_samples = color_bgr[cy_v, cx_v]            # (n_valid, 3) uint8
-    v_chan = bgr_samples.max(axis=1)               # ≈ HSV V (fast proxy)
-    keep = v_chan <= max_v                         # bool mask over valid subset
+
+    if mode == "dark":
+        v_chan = bgr_samples.max(axis=1)           # HSV-V proxy, fast
+        keep = v_chan <= max_v                     # legacy "near-black" filter
+        filter_label = "dark"
+        filter_param = {"max_v": float(max_v)}
+        fail_hint = "BRIDGE_AUTOFIT_COLOR_MAX_V"
+    elif mode == "reject_yellow":
+        hsv = cv2_mod.cvtColor(
+            bgr_samples.reshape(1, -1, 3), cv2_mod.COLOR_BGR2HSV,
+        ).reshape(-1, 3)                           # H[0..180], S/V[0..255]
+        h_chan = hsv[:, 0].astype(np.int16)
+        s_chan = hsv[:, 1]
+        v_chan = hsv[:, 2]
+        is_yellow = (
+            (h_chan >= int(round(yellow_h_min)))
+            & (h_chan <= int(round(yellow_h_max)))
+            & (s_chan >= int(round(yellow_s_min)))
+            & (v_chan >= int(round(yellow_v_min)))
+        )
+        keep = ~is_yellow
+        filter_label = "reject_yellow"
+        filter_param = {
+            "h_min": float(yellow_h_min),
+            "h_max": float(yellow_h_max),
+            "s_min": float(yellow_s_min),
+            "v_min": float(yellow_v_min),
+            "n_yellow": int(is_yellow.sum()),
+        }
+        fail_hint = "BRIDGE_AUTOFIT_YELLOW_*"
+    else:
+        return blob_mask_depth.copy(), {
+            "color_refined": False,
+            "reason": f"unknown color filter mode '{mode}'",
+            "n_blob_before": n_total,
+        }
+
     n_keep = int(keep.sum())
     if n_keep < max(200, n_total // 50):
-        # The colour filter wiped almost everything out — likely the TV is
-        # actually showing bright content during calibration, or max_v is
-        # set too low. Fall back to the unrefined depth blob so the user
-        # at least gets a calibration; the printed warning + UI message
-        # will point at BRIDGE_AUTOFIT_COLOR_MAX_V / the color frame.
         return blob_mask_depth.copy(), {
             "color_refined": False,
             "reason": (
-                f"color filter kept only {n_keep}/{n_valid} pixels "
-                f"(max_v={max_v}); falling back to depth-only blob"
+                f"{filter_label} filter kept only {n_keep}/{n_valid} pixels; "
+                f"falling back to depth-only blob (tune {fail_hint})"
             ),
             "n_blob_before": n_total,
             "n_valid_color": n_valid,
-            "n_dark_kept": n_keep,
-            "max_v_used": float(max_v),
+            "n_kept": n_keep,
+            "filter_mode": filter_label,
+            "filter_param": filter_param,
         }
 
     # Build refined mask in depth-pixel space.
@@ -676,7 +732,9 @@ def _refine_blob_with_color(
             "reason": "no connected component after color filter",
             "n_blob_before": n_total,
             "n_valid_color": n_valid,
-            "n_dark_kept": n_keep,
+            "n_kept": n_keep,
+            "filter_mode": filter_label,
+            "filter_param": filter_param,
         }
     sizes = stats[1:, cv2_mod.CC_STAT_AREA]
     best = 1 + int(np.argmax(sizes))
@@ -687,10 +745,11 @@ def _refine_blob_with_color(
         "color_refined": True,
         "n_blob_before": n_total,
         "n_valid_color": n_valid,
-        "n_dark_kept": n_keep,
+        "n_kept": n_keep,
         "n_after_largest_cc": final_size,
         "removed_pct": float(1.0 - final_size / max(1, n_total)) * 100.0,
-        "max_v_used": float(max_v),
+        "filter_mode": filter_label,
+        "filter_param": filter_param,
         "color_frame_size": [int(Hc), int(Wc)],
     }
     return final_mask, info
@@ -751,7 +810,12 @@ def auto_calibrate_tv_from_depth(
     z_min_m: float = 0.4,
     z_max_m: float = 4.5,
     morph_open_px: int = 3,
+    color_mode: str = "reject_yellow",
     color_max_v: float = 90.0,
+    color_yellow_h_min: float = 10.0,
+    color_yellow_h_max: float = 40.0,
+    color_yellow_s_min: float = 40.0,
+    color_yellow_v_min: float = 50.0,
     color_close_px: int = 3,
     trim_pct: float = 0,
     trim_pct_front: Optional[float] = None,
@@ -770,11 +834,20 @@ def auto_calibrate_tv_from_depth(
         4. Largest connected component = depth-only TV blob candidate.
         5. **Colour refinement.** If a colour frame and the SDK's
            depth→colour mapping were supplied, look up each blob pixel's
-           RGB value and discard everything brighter than ``color_max_v``
-           — wood/bezels are bright, the TV screen is near-black. Take
-           the largest connected component of what survives. (Falls back
-           gracefully to the depth-only blob if mapping is unavailable
-           or the filter wipes everything.)
+           RGB value and either:
+             * (``color_mode="reject_yellow"``, default) discard pixels
+               whose HSV hue lands in the wood/bezel yellow band
+               (``[color_yellow_h_min, color_yellow_h_max]`` on OpenCV's
+               0–180 H scale, with ``S ≥ color_yellow_s_min`` and
+               ``V ≥ color_yellow_v_min`` to ignore desaturated /
+               shadow pixels). Robust to TVs that aren't very dark and
+               have screen reflections.
+             * (``color_mode="dark"``, legacy) discard everything
+               brighter than ``color_max_v``. Works only when the TV is
+               clearly the darkest co-planar surface in view.
+           Take the largest connected component of what survives. Falls
+           back gracefully to the depth-only blob if mapping is
+           unavailable or the filter wipes everything.
         6. Project the refined blob to the plane (u, v), then derive 4
            corners via **PCA + percentile trim** instead of
            ``cv2.minAreaRect``. PCA finds the TV's long / short axes; we
@@ -917,19 +990,27 @@ def auto_calibrate_tv_from_depth(
                 blob_mask,
                 depth_to_color_xy,
                 np.ascontiguousarray(color_bgr, dtype=np.uint8),
-                max_v=float(color_max_v),
                 morph_close_px=int(color_close_px),
                 cv2_mod=cv2,
+                mode=str(color_mode),
+                max_v=float(color_max_v),
+                yellow_h_min=float(color_yellow_h_min),
+                yellow_h_max=float(color_yellow_h_max),
+                yellow_s_min=float(color_yellow_s_min),
+                yellow_v_min=float(color_yellow_v_min),
             )
             if color_info.get("color_refined"):
                 best_size = int(color_info.get("n_after_largest_cc", best_size))
             if best_size < min_blob_px:
+                hint = (
+                    "BRIDGE_AUTOFIT_YELLOW_*" if color_mode == "reject_yellow"
+                    else "BRIDGE_AUTOFIT_COLOR_MAX_V"
+                )
                 return {
                     "ok": False,
                     "reason": (
                         f"after color refine only {best_size}px (<{min_blob_px}); "
-                        "TV may be showing bright content during calibration "
-                        "or BRIDGE_AUTOFIT_COLOR_MAX_V is too low"
+                        f"tune {hint} or BRIDGE_AUTOFIT_COLOR_MODE"
                     ),
                 }
     else:
