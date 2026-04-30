@@ -35,7 +35,6 @@ from .depth_processing import (
     analyze_depth_frame,
     auto_calibrate_tv_from_depth,
     render_depth_debug_bgr,
-    y_axis_shadow_on_plane,
 )
 
 
@@ -51,10 +50,6 @@ class RawHandFrame:
     hand_pos: Tuple[float, float, float]  # fingertip (x, y, z) in Kinect camera meters
     confident: bool                       # large enough hand blob (≥ 2 × min_box_px)
     pinch_dist_direct_m: float = -1.0     # fingertip → TV-plane signed distance (m); -1 if untracked
-    # Y-axis "shadow" of the fingertip on the TV plane (drop the tip
-    # along world Y onto the plane). 3D point in camera meters; None
-    # when the plane is too vertical for a stable Y-intersection.
-    shadow_xyz: Optional[Tuple[float, float, float]] = None
 
 
 class KinectDepthSource:
@@ -238,47 +233,21 @@ class KinectDepthSource:
                 self._tip_ema_uv = sm_uv
                 self._tip_ema_t = now
 
-                # The Y-axis shadow is a deterministic geometric
-                # function of (smoothed tip, plane), so recompute it
-                # from sm_xyz to keep the green dot perfectly locked
-                # to the smoothed red square.
-                plane_now = getattr(self.tv_cal, "plane", None)
-                if plane_now is not None:
-                    sm_shadow_xyz, sm_shadow_uv = y_axis_shadow_on_plane(
-                        sm_xyz, plane_now,
-                    )
-                else:
-                    sm_shadow_xyz = (0.0, 0.0, 0.0)
-                    sm_shadow_uv = (-1.0, -1.0)
-
                 # Mutate analysis["result"] so the debug overlay's red
-                # AND green squares are both drawn at the smoothed
-                # locations.
+                # square is drawn at the smoothed location too.
                 from dataclasses import replace as _dc_replace
                 analysis["result"] = _dc_replace(
-                    res,
-                    tip_xyz=sm_xyz,
-                    debug_uv_tip=sm_uv,
-                    shadow_xyz=sm_shadow_xyz,
-                    debug_uv_shadow=sm_shadow_uv,
+                    res, tip_xyz=sm_xyz, debug_uv_tip=sm_uv,
                 )
                 emit_xyz = sm_xyz
                 emit_dist = res.tip_signed_dist_m
                 emit_conf = res.confident
-                # Only forward the shadow if it was geometrically
-                # well-defined (debug_uv_shadow ≥ 0 means non-zero |b|
-                # AND positive z); otherwise keep it None so the
-                # frontend skips drawing.
-                emit_shadow: Optional[Tuple[float, float, float]] = (
-                    sm_shadow_xyz if sm_shadow_uv[0] >= 0 else None
-                )
             else:
                 self._tip_ema_xyz = None
                 self._tip_ema_uv = None
                 emit_xyz = (0.0, 0.0, 0.0)
                 emit_dist = -1.0
                 emit_conf = False
-                emit_shadow = None
 
             if now - last_debug_push > 0.07:
                 last_debug_push = now
@@ -290,7 +259,6 @@ class KinectDepthSource:
                 hand_pos=emit_xyz,
                 confident=emit_conf,
                 pinch_dist_direct_m=emit_dist,
-                shadow_xyz=emit_shadow,
             ))
 
         try:
@@ -404,7 +372,7 @@ class KinectDepthSource:
                 tf_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_FRONT_PCT", "1.5")
                 tb_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BACK_PCT", "0")
                 tad_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_AD_PCT", "0")
-                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "1")
+                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "0.8")
                 trim_front = float(tf_env) if tf_env != "" else None
                 trim_back = float(tb_env) if tb_env != "" else None
                 trim_ad = float(tad_env) if tad_env != "" else None
