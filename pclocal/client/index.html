@@ -1,0 +1,1212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NCA Local — raw RGBA stream</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #111; color: #eee; min-height: 100vh; }
+  .header { background: #1a1a1a; padding: 12px 20px; border-bottom: 1px solid #333;
+            display: flex; gap: 16px; align-items: center; }
+  .header h1 { font-size: 16px; }
+  #status { font-size: 12px; color: #999; }
+  .main { display: flex; gap: 16px; padding: 16px; }
+  .sidebar { width: 280px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: #1a1a1a; border-radius: 8px; padding: 12px; border: 1px solid #333; }
+  .panel h3 { font-size: 11px; color: #aaa; text-transform: uppercase; letter-spacing: 1px;
+              margin-bottom: 8px; font-weight: 700; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 12px; }
+  .row label { width: 80px; color: #888; }
+  .row select, .row input[type=range] { flex: 1 1 0; min-width: 0; max-width: 100%; }
+  .row select { text-overflow: ellipsis; }
+  .sidebar { overflow: hidden; }
+  .row .val { width: 36px; text-align: right; color: #fff; font-size: 11px; }
+  .btn { padding: 5px 10px; border: 1px solid #555; border-radius: 4px; background: #222;
+         color: #ccc; cursor: pointer; font-size: 11px; }
+  .btn:hover { background: #333; border-color: #888; }
+  .brush-item { padding: 5px 8px; background: #222; border-radius: 4px; margin-bottom: 4px;
+                font-size: 12px; display: flex; align-items: center; gap: 8px; cursor: pointer;
+                border: 1px solid transparent; }
+  .brush-item.selected { border-color: #888; background: #2d2d2d; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
+  canvas { border: 1px solid #333; border-radius: 6px; image-rendering: pixelated;
+           image-rendering: -moz-crisp-edges; image-rendering: crisp-edges;
+           background: #000; cursor: crosshair;
+           touch-action: none; -ms-touch-action: none;
+           -webkit-user-select: none; user-select: none; display: block; }
+  .canvas-wrap { position: relative; display: inline-block; line-height: 0; }
+  #overlayCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+                   pointer-events: none; background: transparent; border: none;
+                   image-rendering: pixelated; image-rendering: -moz-crisp-edges;
+                   image-rendering: crisp-edges; }
+  .canvas-wrap:fullscreen, .canvas-wrap:-webkit-full-screen {
+    display: flex !important; align-items: center; justify-content: center;
+    width: 100vw; height: 100vh; background: #000; padding: 0;
+  }
+  .canvas-wrap:fullscreen #canvas,
+  .canvas-wrap:-webkit-full-screen #canvas {
+    width: 1920px; height: 1080px; position: relative;
+    border: none; border-radius: 0;
+  }
+  .canvas-wrap:fullscreen #overlayCanvas,
+  .canvas-wrap:-webkit-full-screen #overlayCanvas {
+    width: 1920px; height: 1080px; position: absolute;
+    left: 50%; top: 50%; transform: translate(-50%, -50%);
+  }
+
+  /* Kinect calibration overlay — sits above both canvases but below fullscreen UI */
+  #calOverlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+                pointer-events: none; font-family: monospace; z-index: 10; }
+  #calOverlay.hidden { display: none; }
+
+  /* Canvas corner labels — pin TL/TR/BR/BL badges to the four canvas
+     corners. The bridge's depth detection labels its 4 corners A/B/C/D;
+     these canvas-side TL/TR/BR/BL badges are the *target* of that mapping,
+     letting the operator visually verify (and later remap) which detected
+     corner should drive which canvas corner. */
+  .corner-label { position: absolute; padding: 3px 7px;
+                  font-family: monospace; font-size: 11px; font-weight: 700;
+                  color: #fff; background: rgba(255, 0, 255, 0.85);
+                  border: 1px solid rgba(255, 255, 255, 0.75);
+                  border-radius: 4px;
+                  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+                  line-height: 1; letter-spacing: 0.5px;
+                  z-index: 5; pointer-events: none; user-select: none; }
+  .corner-label.hidden { display: none; }
+  .corner-label.corner-tl { top: 6px;    left: 6px; }
+  .corner-label.corner-tr { top: 6px;    right: 6px; }
+  .corner-label.corner-br { bottom: 6px; right: 6px; }
+  .corner-label.corner-bl { bottom: 6px; left: 6px; }
+  .cal-target { position: absolute; width: 28px; height: 28px;
+                border: 2px solid rgba(255,255,255,0.9); border-radius: 50%;
+                transform: translate(-50%, -50%);
+                box-shadow: 0 0 0 1px rgba(0,0,0,0.5) inset; }
+  .cal-target.active { border-color: #ff3; background: rgba(255,240,80,0.25);
+                       box-shadow: 0 0 16px rgba(255,240,80,0.9); }
+  .cal-target.done { border-color: #4f8; background: rgba(80,240,140,0.35); }
+  .cal-instruct { position: absolute; left: 50%; top: 50%;
+                  transform: translate(-50%, -50%);
+                  background: rgba(0,0,0,0.85); color: #eee;
+                  padding: 12px 16px; border-radius: 6px;
+                  font-size: 13px; max-width: 62%; text-align: center;
+                  border: 1px solid #555; line-height: 1.5; }
+
+  .canvas-area { flex: 1; display: flex; flex-direction: column; align-items: center; }
+  #info { font-size: 11px; color: #666; margin-top: 8px; }
+  .help { font-size: 11px; color: #666; margin-top: 6px; }
+
+  /* Kinect sidebar status */
+  .kinect-status { font-size: 11px; color: #888; }
+  .kinect-status.ok { color: #7c7; }
+  .kinect-status.warn { color: #dd6; }
+  .kinect-status.err { color: #e77; }
+  .k-debug-wrap { margin-top: 8px; border: 1px solid #3a3a3a; border-radius: 6px;
+                  padding: 6px; background: #141414; }
+  .k-debug-wrap.hidden { display: none; }
+  .k-debug-stage { position: relative; width: 100%;
+                   background: #000; border-radius: 4px; overflow: hidden; }
+  .k-debug-stage-depth { aspect-ratio: 512 / 424; }
+  .k-debug-feed-label { font-size: 10px; color: #888; margin-top: 4px; margin-bottom: 2px; }
+  #kinectDebugDepthImg {
+    position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+    object-fit: contain; image-rendering: pixelated; background: #080808;
+  }
+  #kinectDebugStats { margin-top: 6px; font-size: 11px; color: #aaa; line-height: 1.35; }
+  .tv-cal-panel { margin-top: 6px; padding: 6px 8px; border: 1px solid #3a3a3a;
+                  border-radius: 6px; background: #161616; }
+  .tv-cal-panel.hidden { display: none; }
+  .tv-cal-step { font-size: 12px; color: #ddd; margin-bottom: 4px; }
+  .tv-cal-step b { color: #ffd24a; }
+  .tv-cal-bodyok { font-size: 11px; color: #7c7; }
+  .tv-cal-bodybad { font-size: 11px; color: #e77; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>NCA Remote</h1>
+  <div id="status">Connecting…</div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Base models (A/B/C/D)</h3>
+      <div class="row"><label>A</label><select id="baseA"></select></div>
+      <div class="row"><label>B</label><select id="baseB"></select></div>
+      <div class="row"><label>C</label><select id="baseC"></select></div>
+      <div class="row"><label>D</label><select id="baseD"></select></div>
+    </div>
+
+    <div class="panel">
+      <h3>Brush models</h3>
+      <div class="row">
+        <select id="brushPicker" style="flex:1"></select>
+        <button class="btn" id="addBrushBtn">+ add</button>
+      </div>
+      <div id="brushList"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Controls</h3>
+      <div class="row"><label>Active</label><input type="checkbox" id="activeChk" checked></div>
+      <div class="row"><label>Disturb</label><input type="checkbox" id="disturbChk"></div>
+      <div class="row"><label>Tint</label><input type="checkbox" id="tintChk"></div>
+      <div class="row"><label>Alignment</label>
+        <select id="alignSel">
+          <option value="0">Cartesian</option>
+          <option value="1">Polar</option>
+          <option value="2" selected>Bipolar</option>
+        </select>
+      </div>
+      <div class="row"><label>Rotation</label>
+        <input type="range" id="rotRange" min="0" max="360" value="0">
+        <span class="val" id="rotVal">0</span>
+      </div>
+      <div class="row"><label>Speed</label>
+        <input type="range" id="speedRange" min="1" max="16" value="1">
+        <span class="val" id="speedVal">1</span>
+      </div>
+      <div class="row"><label>Zoom</label>
+        <input type="range" id="zoomRange" min="1" max="6" value="1" step="0.5">
+        <span class="val" id="zoomVal">1</span>
+      </div>
+      <button class="btn" id="clearBtn">Clear canvas</button>
+      <button class="btn" id="reseedBtn">New noise seed</button>
+      <button class="btn" id="fsBtn">Fullscreen 1920×1080</button>
+    </div>
+
+    <div class="panel">
+      <h3>Kinect</h3>
+      <div class="row"><span id="kinectStatus" class="kinect-status">Not connected</span></div>
+      <div class="row"><span id="tvCalStatusText" class="kinect-status" style="color:#aaa;">TV: not calibrated</span></div>
+
+      <div class="row" style="gap:6px; margin-top:4px;">
+        <button class="btn" id="tvAutoCalBtn" style="flex:1;">Auto-Calibrate TV (Depth)</button>
+      </div>
+      <div class="row" style="gap:6px; margin-top:6px;">
+        <button class="btn" id="tvCalResetBtn" style="flex:1;">Reset TV Calibration</button>
+      </div>
+
+      <div id="tvAutoCalInfo" class="help" style="margin-top:6px; color:#888;"></div>
+
+      <div class="help" style="margin-top:6px;">
+        Clear hands &amp; people from view, then click <b>Auto-Calibrate</b>.
+        The bridge captures ~1.5 s of depth, RANSAC-fits the dominant plane,
+        keeps the largest co-planar blob (= the TV screen), and labels its 4
+        detected corners <b>A/B/C/D</b> (clockwise from front-left in camera
+        space). The canvas's own four corners are <b>TL/TR/BR/BL</b>; the
+        mapping between the two is what drives where you paint. Use the
+        depth debug view below to see A/B/C/D in magenta, and the badges on
+        the canvas to see TL/TR/BR/BL — adjust the mapping until they line up
+        the way you want.
+        <span id="kinectModeHelp" style="display:block;margin-top:4px;color:#777;"></span>
+      </div>
+      <div class="row" style="gap:6px; margin-top:8px;">
+        <button class="btn" id="kDebugToggleBtn" style="flex:1;">Debug View: Off</button>
+      </div>
+      <div class="row" style="gap:6px; margin-top:6px;">
+        <button class="btn" id="cornerLabelsToggleBtn" style="flex:1;">Canvas Corners: On</button>
+      </div>
+      <div id="kDebugWrap" class="k-debug-wrap hidden">
+        <div class="k-debug-feed-label">
+          Depth — magenta polygon = calibrated TV; magenta fill = pixels on plane;
+          orange wireframe = interaction box; orange fill = cleaned hand silhouette;
+          red square = depth fingertip (PCA extremity, EMA-smoothed)
+        </div>
+        <div class="k-debug-stage k-debug-stage-depth">
+          <img id="kinectDebugDepthImg" alt="depth debug stream">
+        </div>
+        <div id="kinectDebugStats">tracked: - | tv: - | tip: -</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Perlin (altitude bands)</h3>
+      <div class="row"><label>Scale</label>
+        <input type="range" id="nsRange" min="1" max="7" value="5" step="0.05">
+        <span class="val" id="nsVal">5.00</span>
+      </div>
+      <div class="row"><label>Octaves</label>
+        <input type="range" id="ocRange" min="100" max="250" value="100" step="1">
+        <span class="val" id="ocVal">1.00</span>
+      </div>
+      <div class="row"><label>Layer Δfreq</label>
+        <input type="range" id="bhRange" min="0" max="100" value="55" step="1">
+        <span class="val" id="bhVal">0.55</span>
+      </div>
+      <div class="row"><label>Z speed</label>
+        <input type="range" id="zsRange" min="0" max="200" value="0" step="1">
+        <span class="val" id="zsVal">0.000</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Brush</h3>
+      <div class="row"><label>Size</label>
+        <input type="range" id="brushSize" min="1" max="20" value="5">
+        <span class="val" id="brushSizeVal">5</span>
+      </div>
+      <div class="row"><label>Threshold</label>
+        <input type="range" id="thrRange" min="2" max="98" value="43">
+        <span class="val" id="thrVal">0.43</span>
+      </div>
+      <div class="row"><label>Edge</label>
+        <input type="range" id="edgeRange" min="1" max="80" value="33">
+        <span class="val" id="edgeVal">33</span>
+      </div>
+      <button class="btn" id="clearBrushBtn">Clear selected mask</button>
+    </div>
+
+    <div class="panel">
+      <h3>Spray (splatter + drip)</h3>
+      <div class="row"><label>Splatter</label>
+        <input type="range" id="spAmtRange" min="0" max="40" value="12" step="1">
+        <span class="val" id="spAmtVal">12</span>
+      </div>
+      <div class="row"><label>Splat R</label>
+        <input type="range" id="spRadRange" min="2" max="100" value="30" step="1">
+        <span class="val" id="spRadVal">30</span>
+      </div>
+      <div class="row"><label>Drip thr</label>
+        <input type="range" id="dripThrRange" min="4" max="200" value="45" step="1">
+        <span class="val" id="dripThrVal">0.45</span>
+      </div>
+      <div class="row"><label>Drip spd</label>
+        <input type="range" id="dripSpdRange" min="4" max="80" value="40" step="1">
+        <span class="val" id="dripSpdVal">0.40</span>
+      </div>
+      <div class="row" style="gap:4px;">
+        <label>Gravity</label>
+        <button class="btn dripDirBtn" data-dir="0" title="Down">&#9660;</button>
+        <button class="btn dripDirBtn" data-dir="1" title="Up">&#9650;</button>
+        <button class="btn dripDirBtn" data-dir="2" title="Left">&#9664;</button>
+        <button class="btn dripDirBtn" data-dir="3" title="Right">&#9654;</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas-area">
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="canvas"></canvas>
+      <canvas id="overlayCanvas"></canvas>
+      <div id="calOverlay" class="hidden"></div>
+      <div class="corner-label corner-tl" id="cornerLabelTL">TL</div>
+      <div class="corner-label corner-tr" id="cornerLabelTR">TR</div>
+      <div class="corner-label corner-br" id="cornerLabelBR">BR</div>
+      <div class="corner-label corner-bl" id="cornerLabelBL">BL</div>
+    </div>
+    <div id="info">no frames yet</div>
+    <div class="help">
+      Hold left button and drag to paint with the selected brush model.
+      <strong>Shift</strong> + drag erases.
+      Kinect pinch (when connected) paints with the active brush as well.
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ----- Config -----
+var W = 480, H = 270;            // overwritten by hello msg
+var zoom = 1;
+var ws = null;
+var wsReady = false;
+
+// ----- DOM -----
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+var statusEl = document.getElementById('status');
+var infoEl = document.getElementById('info');
+
+// ----- State -----
+var availableModels = [];        // [filename...]
+var brushes = [];                // [{id, name, color}]
+var selectedBrushId = null;
+var brushSize = 5;
+var isDrawing = false;
+var frameCount = 0;
+var bytesRecv = 0;
+var lastSampleT = performance.now();
+var fps = 0;
+
+// ----- WS connect -----
+// Local build: server sends raw RGBA bytes (W*H*4 per frame). We grab
+// them as ArrayBuffer and blit directly with putImageData — no decoder,
+// no compression, no quality loss.
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = function() {
+    wsReady = true;
+    statusEl.textContent = 'Connected';
+  };
+  ws.onclose = function() {
+    wsReady = false;
+    statusEl.textContent = 'Disconnected — retry in 2s';
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = function() { statusEl.textContent = 'WS error'; };
+  ws.onmessage = function(ev) {
+    if (typeof ev.data === 'string') {
+      handleJson(JSON.parse(ev.data));
+    } else {
+      bytesRecv += ev.data.byteLength;
+      drawFrameRaw(ev.data);
+    }
+  };
+}
+
+function send(obj) {
+  if (wsReady) ws.send(JSON.stringify(obj));
+}
+
+function handleJson(msg) {
+  if (msg.type === 'hello') {
+    W = msg.W; H = msg.H;
+    expectedFrameBytes = (typeof msg.frame_bytes === 'number')
+      ? msg.frame_bytes
+      : (W * H * 4);
+    canvas.width = W; canvas.height = H;
+    // Pre-allocate the ImageData once; subsequent frames just memcpy
+    // into its .data Uint8ClampedArray (no GC pressure).
+    frameImageData = ctx.createImageData(W, H);
+    applyZoom();
+    var fmt = msg.frame_format || 'rgba8';
+    statusEl.textContent = 'Connected — device: ' + msg.device + ' | ' + W + '×' + H + ' | ' + fmt;
+    availableModels = msg.models || [];
+    populateModelSelectors();
+  } else if (msg.type === 'models') {
+    availableModels = msg.models || [];
+    populateModelSelectors();
+  } else if (msg.type === 'loaded_base') {
+    // Could update label per slot if desired
+  } else if (msg.type === 'loaded_brush') {
+    brushes.push({ id: msg.id, name: msg.name, color: msg.color });
+    selectedBrushId = msg.id;
+    rebuildBrushList();
+  } else if (msg.type === 'error') {
+    console.warn('server error:', msg.msg);
+    statusEl.textContent = 'Error: ' + msg.msg;
+  }
+}
+
+// ----- Frame rendering (raw RGBA → putImageData, zero copy beyond the
+// ws→Uint8ClampedArray view) -----
+//
+// We're on loopback. There is no jitter, no encode wait, no decode wait.
+// Pre-allocate one ImageData of the right size at hello-time and just
+// .set() each incoming frame's bytes into it. putImageData on the same
+// canvas is faster than drawImage(<bitmap>) because it skips colour
+// conversion / texture upload — the canvas backing store is already
+// RGBA8.
+var expectedFrameBytes = 0;
+var frameImageData = null;       // ImageData(W, H) reused across frames
+
+function drawFrameRaw(arrayBuffer) {
+  if (!frameImageData) return;   // hello hasn't arrived yet
+  if (arrayBuffer.byteLength !== expectedFrameBytes) {
+    // Server changed grid size mid-session, or we lost framing. Skip
+    // until next hello (server only changes W/H on restart, so this is
+    // only a console diagnostic for unexpected length mismatch).
+    if (!drawFrameRaw._warned) {
+      console.warn('frame size mismatch: got', arrayBuffer.byteLength,
+                   'expected', expectedFrameBytes);
+      drawFrameRaw._warned = true;
+    }
+    return;
+  }
+  frameImageData.data.set(new Uint8Array(arrayBuffer));
+  ctx.putImageData(frameImageData, 0, 0);
+  frameCount++;
+}
+
+// ----- Model selectors -----
+function populateModelSelectors() {
+  var slots = ['baseA', 'baseB', 'baseC', 'baseD'];
+  slots.forEach(function(id) {
+    var sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">— none —</option>';
+    availableModels.forEach(function(name) {
+      var opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    });
+  });
+  var picker = document.getElementById('brushPicker');
+  picker.innerHTML = '';
+  availableModels.forEach(function(name) {
+    var opt = document.createElement('option');
+    opt.value = name; opt.textContent = name;
+    picker.appendChild(opt);
+  });
+}
+
+['baseA', 'baseB', 'baseC', 'baseD'].forEach(function(id, slot) {
+  document.getElementById(id).onchange = function(e) {
+    if (e.target.value) send({ op: 'load_base', slot: slot, path: e.target.value });
+  };
+});
+document.getElementById('addBrushBtn').onclick = function() {
+  var path = document.getElementById('brushPicker').value;
+  console.log('[+add brush] picker value =', JSON.stringify(path), '| availableModels =', availableModels.length);
+  if (!path) {
+    statusEl.textContent = 'No brush model selected — pick one in the dropdown first';
+    return;
+  }
+  console.log('[+add brush] sending load_brush:', path);
+  send({ op: 'load_brush', path: path });
+};
+
+function rebuildBrushList() {
+  var list = document.getElementById('brushList');
+  list.innerHTML = '';
+  brushes.forEach(function(bm) {
+    var row = document.createElement('div');
+    row.className = 'brush-item' + (bm.id === selectedBrushId ? ' selected' : '');
+    row.onclick = function() { selectedBrushId = bm.id; rebuildBrushList(); };
+    var dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = 'rgb(' + bm.color.map(Math.round).join(',') + ')';
+    var name = document.createElement('span');
+    name.style.flex = '1'; name.textContent = bm.name;
+    var rm = document.createElement('button');
+    rm.className = 'btn'; rm.textContent = '×';
+    rm.onclick = function(e) {
+      e.stopPropagation();
+      send({ op: 'remove_brush', id: bm.id });
+      brushes = brushes.filter(function(b) { return b.id !== bm.id; });
+      if (selectedBrushId === bm.id) selectedBrushId = brushes.length ? brushes[0].id : null;
+      rebuildBrushList();
+    };
+    row.appendChild(dot); row.appendChild(name); row.appendChild(rm);
+    list.appendChild(row);
+  });
+}
+
+// ----- Canvas paint events -----
+function clientToGrid(clientX, clientY) {
+  var r = canvas.getBoundingClientRect();
+  var gx = Math.floor((clientX - r.left) / r.width * W);
+  var gy = Math.floor((clientY - r.top) / r.height * H);
+  return [Math.max(0, Math.min(W - 1, gx)), Math.max(0, Math.min(H - 1, gy))];
+}
+
+// Unified pointer events handle mouse, pen, and touch (iPad) in one path.
+var lastDrawGx = -1, lastDrawGy = -1;
+var activePointerId = null;
+var shiftHeldForTouch = false;  // toggled by long-press menu would be ideal; for now use shift key only
+var queuedStrokeEnd = null;
+var queuedStrokeErase = false;
+var strokeFlushTimer = null;
+var strokeFlushIntervalMs = 1000 / 60; // Fixed stroke send cadence independent of 120Hz displays.
+var lastStrokeFlushAt = 0;
+
+window.addEventListener('keydown', function(e) { if (e.key === 'Shift') shiftHeldForTouch = true; });
+window.addEventListener('keyup',   function(e) { if (e.key === 'Shift') shiftHeldForTouch = false; });
+
+function isEraseEvent(e) {
+  return !!e.shiftKey || shiftHeldForTouch;
+}
+
+function flushQueuedStroke(force) {
+  if (strokeFlushTimer !== null) {
+    clearTimeout(strokeFlushTimer);
+    strokeFlushTimer = null;
+  }
+  if ((!isDrawing && !force) || selectedBrushId === null || !queuedStrokeEnd) return;
+  var gx = queuedStrokeEnd[0];
+  var gy = queuedStrokeEnd[1];
+  var erase = queuedStrokeErase;
+  if (gx === lastDrawGx && gy === lastDrawGy) return;
+  send({
+    op: 'stroke', id: selectedBrushId,
+    x0: lastDrawGx, y0: lastDrawGy,
+    x1: gx, y1: gy,
+    r: brushSize, erase: erase,
+  });
+  lastDrawGx = gx; lastDrawGy = gy;
+  lastStrokeFlushAt = performance.now();
+}
+
+function scheduleStrokeFlush() {
+  if (strokeFlushTimer !== null) return;
+  var now = performance.now();
+  var elapsed = now - lastStrokeFlushAt;
+  var delay = Math.max(0, strokeFlushIntervalMs - elapsed);
+  strokeFlushTimer = setTimeout(function() {
+    flushQueuedStroke(false);
+  }, delay);
+}
+
+canvas.addEventListener('pointerdown', function(e) {
+  if (selectedBrushId === null) return;
+  // Mouse: only left button. Touch/pen: button === 0.
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  // Capture so move/up still target the canvas even if the finger leaves it.
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  activePointerId = e.pointerId;
+  isDrawing = true;
+  queuedStrokeEnd = null;
+  queuedStrokeErase = false;
+  if (strokeFlushTimer !== null) {
+    clearTimeout(strokeFlushTimer);
+    strokeFlushTimer = null;
+  }
+  lastStrokeFlushAt = 0;
+  var g = clientToGrid(e.clientX, e.clientY);
+  lastDrawGx = g[0]; lastDrawGy = g[1];
+  send({ op: 'stamp', id: selectedBrushId, x: g[0], y: g[1], r: brushSize, erase: isEraseEvent(e) });
+});
+
+canvas.addEventListener('pointermove', function(e) {
+  if (!isDrawing || selectedBrushId === null) return;
+  if (activePointerId !== null && e.pointerId !== activePointerId) return;
+  e.preventDefault();
+  var g = clientToGrid(e.clientX, e.clientY);
+  if (g[0] === lastDrawGx && g[1] === lastDrawGy) return;
+  queuedStrokeEnd = g;
+  queuedStrokeErase = isEraseEvent(e);
+  scheduleStrokeFlush();
+});
+
+function endPointer(e) {
+  if (activePointerId !== null && e && e.pointerId !== activePointerId) return;
+  if (activePointerId !== null) {
+    try { canvas.releasePointerCapture(activePointerId); } catch (_) {}
+  }
+  if (queuedStrokeEnd) flushQueuedStroke(true);
+  isDrawing = false;
+  queuedStrokeEnd = null;
+  queuedStrokeErase = false;
+  if (strokeFlushTimer !== null) {
+    clearTimeout(strokeFlushTimer);
+    strokeFlushTimer = null;
+  }
+  lastDrawGx = -1; lastDrawGy = -1;
+  activePointerId = null;
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('pointerleave', function(e) {
+  // Don't end on leave if pointer is captured — capture keeps tracking.
+  if (activePointerId !== null && canvas.hasPointerCapture && canvas.hasPointerCapture(activePointerId)) return;
+  endPointer(e);
+});
+
+// ----- Control bindings -----
+function bindRange(id, valId, op, name, transform) {
+  var r = document.getElementById(id), v = document.getElementById(valId);
+  r.oninput = function() {
+    var raw = parseFloat(r.value);
+    var t = transform ? transform(raw) : raw;
+    v.textContent = (typeof t === 'number') ? (Math.abs(t) < 10 ? t.toFixed(2) : t.toFixed(0)) : t;
+    send({ op: op, name: name, value: t });
+  };
+}
+function bindCheck(id, op, name) {
+  document.getElementById(id).onchange = function(e) {
+    send({ op: op, name: name, value: e.target.checked });
+  };
+}
+
+document.getElementById('alignSel').onchange = function(e) {
+  send({ op: 'set_param', name: 'alignment', value: parseInt(e.target.value, 10) });
+};
+bindRange('rotRange', 'rotVal', 'set_param', 'rotation_deg');
+bindRange('speedRange', 'speedVal', 'set_param', 'steps_per_frame');
+bindCheck('activeChk', 'set_param', 'active');
+bindCheck('disturbChk', 'set_param', 'disturbance');
+bindCheck('tintChk', 'set_param', 'show_mask_tint');
+bindRange('nsRange', 'nsVal', 'set_param', 'noise_scale');
+bindRange('ocRange', 'ocVal', 'set_param', 'octaves', function(x) { return x / 100; });
+bindRange('bhRange', 'bhVal', 'set_param', 'layer_freq_spread', function(x) { return x / 100; });
+bindRange('zsRange', 'zsVal', 'set_param', 'noise_z_speed', function(x) { return x / 4000; });
+bindRange('thrRange', 'thrVal', 'set_param', 'mask_threshold', function(x) { return x / 100; });
+bindRange('edgeRange', 'edgeVal', 'set_param', 'mask_edge_sharpness');
+
+// ----- Spray controls -----
+bindRange('spAmtRange', 'spAmtVal', 'set_param', 'spray_splatter_amount');
+bindRange('spRadRange', 'spRadVal', 'set_param', 'spray_splatter_radius');
+bindRange('dripThrRange', 'dripThrVal', 'set_param', 'spray_drip_threshold', function(x) { return x / 100; });
+bindRange('dripSpdRange', 'dripSpdVal', 'set_param', 'spray_drip_speed', function(x) { return x / 100; });
+
+var dripGravity = 0;
+function updateDripDirBtns() {
+  var btns = document.querySelectorAll('.dripDirBtn');
+  btns.forEach(function(b) {
+    var d = parseInt(b.getAttribute('data-dir'), 10);
+    if (d === dripGravity) { b.style.borderColor = '#ddd'; b.style.color = '#fff'; }
+    else { b.style.borderColor = '#555'; b.style.color = '#ccc'; }
+  });
+}
+document.querySelectorAll('.dripDirBtn').forEach(function(b) {
+  b.onclick = function() {
+    dripGravity = parseInt(b.getAttribute('data-dir'), 10);
+    updateDripDirBtns();
+    send({ op: 'set_param', name: 'drip_gravity', value: dripGravity });
+  };
+});
+updateDripDirBtns();
+
+document.getElementById('zoomRange').oninput = function(e) {
+  zoom = parseFloat(e.target.value);
+  document.getElementById('zoomVal').textContent = zoom;
+  applyZoom();
+};
+document.getElementById('brushSize').oninput = function(e) {
+  brushSize = parseInt(e.target.value, 10);
+  document.getElementById('brushSizeVal').textContent = String(brushSize);
+};
+document.getElementById('clearBtn').onclick = function() { send({ op: 'clear_state' }); };
+document.getElementById('reseedBtn').onclick = function() { send({ op: 'reseed' }); };
+document.getElementById('clearBrushBtn').onclick = function() {
+  if (selectedBrushId !== null) send({ op: 'clear_brush', id: selectedBrushId });
+};
+
+// ----- Fullscreen 1920×1080 (pure 2× nearest-neighbor upscale from 960×540) -----
+// The wrapper div (canvas + overlay + calibration layer) goes fullscreen so
+// that Kinect cursor / calibration markers stay aligned with the paint canvas.
+// `image-rendering: pixelated` on each canvas guarantees nearest-neighbor
+// sampling, so a 960×540 source pixel becomes exactly a 2×2 block at 1920×1080.
+var canvasWrapEl = document.getElementById('canvasWrap');
+document.getElementById('fsBtn').onclick = function() {
+  var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (!fsEl) {
+    var req = canvasWrapEl.requestFullscreen || canvasWrapEl.webkitRequestFullscreen;
+    if (req) req.call(canvasWrapEl);
+  } else {
+    var exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) exit.call(document);
+  }
+};
+
+function onFullscreenChange() {
+  var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+  if (fsEl === canvasWrapEl) {
+    // CSS pins both canvases to 1920×1080 while the wrapper fills the screen.
+    canvas.style.width = '1920px';
+    canvas.style.height = '1080px';
+  } else {
+    applyZoom();
+  }
+}
+document.addEventListener('fullscreenchange', onFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+
+function applyZoom() {
+  canvas.style.width = Math.round(W * zoom) + 'px';
+  canvas.style.height = Math.round(H * zoom) + 'px';
+  resizeOverlayCanvas();
+}
+
+// ----- FPS / bandwidth sampler -----
+setInterval(function() {
+  var now = performance.now();
+  var dt = (now - lastSampleT) / 1000;
+  fps = frameCount / dt;
+  // Local build runs uncompressed RGBA (MB/s scale, not kbps), so
+  // report MB/s directly.
+  var mbps = (bytesRecv / 1048576) / dt;
+  frameCount = 0; bytesRecv = 0; lastSampleT = now;
+  infoEl.textContent = 'FPS: ' + fps.toFixed(1) + ' | ' + mbps.toFixed(1) + ' MB/s (raw RGBA)' +
+    ' | brushes: ' + brushes.length + (selectedBrushId !== null ? ' (sel #' + selectedBrushId + ')' : '');
+}, 1000);
+
+connect();
+
+// =========================================================================
+// Kinect bridge (local WebSocket) — hand cursor overlay + pinch-driven paint
+// =========================================================================
+// The bridge runs locally (Windows laptop with Kinect). It feeds us a stream
+// of `{op:"hand", cx, cy, pinch, tracked, cal_*}` messages at ~30Hz after a
+// one-time 4-point calibration. While calibration is in progress we suppress
+// painting so the user can place their hand at each corner without drawing.
+// Mouse input keeps working in parallel; nothing below touches the mouse path.
+
+var BRIDGE_URL = (function() {
+  var p = new URLSearchParams(location.search).get('bridge');
+  if (p) return p;
+  // Local single-process build: the bridge is mounted under /bridge of
+  // the same FastAPI app that serves this page. No separate port.
+  var proto = (location.protocol === 'https:') ? 'wss:' : 'ws:';
+  return proto + '//' + location.host + '/bridge/ws';
+})();
+
+var bridgeWs = null;
+var bridgeReady = false;
+var bridgeKinectMode = 'depth';
+var bridgeTvReady = false;
+var bridgeTvStatus = { mode: 'idle', current_corner: 0, captured: 0, total: 4 };
+var tvAutoCalRunning = false;
+var tvAutoCalLastInfo = '';
+var bridgeStatusEl = document.getElementById('kinectStatus');
+var tvCalStatusTextEl = document.getElementById('tvCalStatusText');
+var tvAutoCalBtn = document.getElementById('tvAutoCalBtn');
+var tvAutoCalInfoEl = document.getElementById('tvAutoCalInfo');
+var tvCalResetBtn = document.getElementById('tvCalResetBtn');
+var calOverlayEl = document.getElementById('calOverlay');
+var kDebugToggleBtn = document.getElementById('kDebugToggleBtn');
+var kDebugWrap = document.getElementById('kDebugWrap');
+var kinectDebugDepthImg = document.getElementById('kinectDebugDepthImg');
+var kinectDebugStats = document.getElementById('kinectDebugStats');
+var kDebugEnabled = false;
+var cornerLabelsBtn = document.getElementById('cornerLabelsToggleBtn');
+var cornerLabelEls = [
+  document.getElementById('cornerLabelTL'),
+  document.getElementById('cornerLabelTR'),
+  document.getElementById('cornerLabelBR'),
+  document.getElementById('cornerLabelBL'),
+];
+var cornerLabelsVisible = true;
+var kDebugDepthInflight = false;
+var kDebugDepthBaseUrl = '';
+var kDebugDepthTimer = null;
+var kDebugPollMs = 140;
+
+function bridgeToHttpRoot(wsUrl) {
+  if (!wsUrl || typeof wsUrl !== 'string') return '';
+  try {
+    var u = new URL(wsUrl);
+    var httpProto = (u.protocol === 'wss:') ? 'https:' : (u.protocol === 'ws:' ? 'http:' : '');
+    if (!httpProto) return '';
+    // Accept both ".../ws" and ".../ws/" while preserving proxy path prefixes.
+    var p = u.pathname || '/';
+    p = p.replace(/\/+$/, '');
+    if (p.endsWith('/ws')) p = p.slice(0, -3);
+    if (!p) p = '/';
+    return httpProto + '//' + u.host + p;
+  } catch (_) {
+    // Fallback for malformed inputs; keep previous behavior as best-effort.
+    if (wsUrl.indexOf('wss://') === 0) return 'https://' + wsUrl.slice(6).replace(/\/ws\/?$/, '');
+    if (wsUrl.indexOf('ws://') === 0) return 'http://' + wsUrl.slice(5).replace(/\/ws\/?$/, '');
+    return '';
+  }
+}
+
+function bridgeDebugDepthImageBase(wsUrl) {
+  if (!wsUrl || typeof wsUrl !== 'string') return '';
+  try {
+    var u = new URL(wsUrl);
+    var httpProto = (u.protocol === 'wss:') ? 'https:' : (u.protocol === 'ws:' ? 'http:' : '');
+    if (!httpProto) return '';
+    var p = u.pathname || '/';
+    p = p.replace(/\/+$/, '');
+    if (p.endsWith('/ws')) p = p.slice(0, -3);
+    if (!p) p = '/';
+    if (p[p.length - 1] !== '/') p += '/';
+    var base = httpProto + '//' + u.host + p + 'debug/depth.jpg';
+    // Preserve query parameters (e.g. RunPod token) required by the bridge ingress.
+    if (u.search && u.search.length > 1) base += u.search;
+    return base;
+  } catch (_) {
+    return '';
+  }
+}
+
+function setKDebugEnabled(enabled) {
+  kDebugEnabled = !!enabled;
+  if (kDebugToggleBtn) kDebugToggleBtn.textContent = 'Debug View: ' + (kDebugEnabled ? 'On' : 'Off');
+  if (kDebugWrap) kDebugWrap.classList.toggle('hidden', !kDebugEnabled);
+  if (!kDebugEnabled) {
+    if (kDebugDepthTimer !== null) {
+      clearTimeout(kDebugDepthTimer);
+      kDebugDepthTimer = null;
+    }
+    kDebugDepthInflight = false;
+    kDebugDepthBaseUrl = '';
+    if (kinectDebugDepthImg) kinectDebugDepthImg.removeAttribute('src');
+    return;
+  }
+  kDebugDepthBaseUrl = bridgeDebugDepthImageBase(BRIDGE_URL) || '';
+  kDebugDepthInflight = false;
+  if (kDebugDepthTimer !== null) {
+    clearTimeout(kDebugDepthTimer);
+    kDebugDepthTimer = null;
+  }
+  if (kinectDebugDepthImg && kDebugDepthBaseUrl) {
+    requestKinectDebugFrameDepth();
+  }
+}
+
+function requestKinectDebugFrameDepth() {
+  if (!kDebugEnabled || !kinectDebugDepthImg || !kDebugDepthBaseUrl) return;
+  if (kDebugDepthInflight) return;
+  kDebugDepthInflight = true;
+  var sep = (kDebugDepthBaseUrl.indexOf('?') >= 0) ? '&' : '?';
+  kinectDebugDepthImg.src = kDebugDepthBaseUrl + sep + 't=' + Date.now();
+}
+
+function scheduleNextKinectDebugFrameDepth() {
+  if (!kDebugEnabled) return;
+  if (kDebugDepthTimer !== null) clearTimeout(kDebugDepthTimer);
+  kDebugDepthTimer = setTimeout(function() {
+    requestKinectDebugFrameDepth();
+  }, kDebugPollMs);
+}
+
+if (kinectDebugDepthImg) {
+  kinectDebugDepthImg.onload = function() {
+    kDebugDepthInflight = false;
+    scheduleNextKinectDebugFrameDepth();
+  };
+  kinectDebugDepthImg.onerror = function() {
+    kDebugDepthInflight = false;
+    if (kinectDebugStats) {
+      kinectDebugStats.textContent = 'depth debug failed — check /debug/depth.jpg';
+    }
+    scheduleNextKinectDebugFrameDepth();
+  };
+}
+
+function setBridgeStatus(text, cls) {
+  if (!bridgeStatusEl) return;
+  bridgeStatusEl.textContent = text;
+  bridgeStatusEl.className = 'kinect-status ' + (cls || '');
+}
+
+function sendBridge(obj) {
+  if (bridgeReady && bridgeWs) {
+    try { bridgeWs.send(JSON.stringify(obj)); } catch (_) {}
+  }
+}
+
+function connectBridge() {
+  setBridgeStatus('Connecting to bridge…', '');
+  try {
+    bridgeWs = new WebSocket(BRIDGE_URL);
+  } catch (err) {
+    setBridgeStatus('Bridge URL invalid', 'err');
+    return;
+  }
+  bridgeWs.onopen = function() {
+    bridgeReady = true;
+    setBridgeStatus('Bridge connected', 'ok');
+  };
+  bridgeWs.onerror = function() {
+    setBridgeStatus('Bridge error', 'err');
+  };
+  bridgeWs.onclose = function() {
+    bridgeReady = false;
+    tvAutoCalRunning = false;
+    setBridgeStatus('Bridge disconnected — retry in 3s', 'warn');
+    clearOverlay();
+    if (calOverlayEl) {
+      calOverlayEl.classList.add('hidden');
+      calOverlayEl.innerHTML = '';
+    }
+    if (kDebugEnabled) setKDebugEnabled(false);
+    applyTvCalStatusUI();
+    setTimeout(connectBridge, 3000);
+  };
+  bridgeWs.onmessage = function(ev) {
+    var msg;
+    try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    handleBridgeMsg(msg);
+  };
+}
+
+function applyKinectStatus(kinectOk, helloLike) {
+  var modeHelp = document.getElementById('kinectModeHelp');
+  if (modeHelp) {
+    modeHelp.textContent = bridgeKinectMode === 'depth'
+      ? ('Mode: depth (Body+Depth) | TV: ' + (bridgeTvReady ? 'calibrated' : 'NOT calibrated — click Auto-Calibrate'))
+      : ('Mode: body (SDK only) | TV: n/a');
+  }
+  setBridgeStatus(
+    kinectOk
+      ? ('Bridge connected — Kinect OK | mode: ' + bridgeKinectMode +
+         ' | tv: ' + (bridgeTvReady ? 'ok' : 'no'))
+      : 'Bridge connected — Kinect not found',
+    kinectOk ? 'ok' : 'warn'
+  );
+  applyTvCalStatusUI();
+}
+
+function describeAutoCalResult(m) {
+  var px = m.n_blob_px || 0;
+  var area = (typeof m.area_m2 === 'number') ? m.area_m2.toFixed(3) : '-';
+  var ea = (typeof m.edge_a_m === 'number') ? m.edge_a_m.toFixed(3) : '-';
+  var eb = (typeof m.edge_b_m === 'number') ? m.edge_b_m.toFixed(3) : '-';
+  var s = 'TV blob=' + px + 'px, area=' + area + 'm² (' + ea + '×' + eb + 'm)';
+  var ci = m.color_info || null;
+  if (ci) {
+    if (ci.color_refined) {
+      var before = ci.n_blob_before || 0;
+      var after = ci.n_after_largest_cc || 0;
+      var pct = (typeof ci.removed_pct === 'number') ? ci.removed_pct.toFixed(1) : '?';
+      var fmode = ci.filter_mode || 'color';
+      var fparam = ci.filter_param || {};
+      var detail;
+      if (fmode === 'reject_yellow') {
+        var hMin = fparam.h_min, hMax = fparam.h_max;
+        var sMin = fparam.s_min, vMin = fparam.v_min;
+        var nY = (typeof fparam.n_yellow === 'number') ? fparam.n_yellow : 0;
+        detail = 'rejected ' + nY + 'px as yellow H[' + hMin + '–' + hMax + '] S≥' + sMin + ' V≥' + vMin;
+      } else {
+        var maxV = (typeof fparam.max_v === 'number') ? fparam.max_v : '?';
+        detail = 'removed ' + pct + '% as bright, max V=' + maxV;
+      }
+      s += ' · color[' + fmode + ']: ' + before + '→' + after + 'px (' + detail + ')';
+    } else if (ci.reason) {
+      s += ' · color: skipped (' + ci.reason + ')';
+    }
+  }
+  return s;
+}
+
+function handleBridgeMsg(m) {
+  var op = m.op;
+  if (op === 'hello') {
+    bridgeKinectMode = m.kinect_mode || 'depth';
+    bridgeTvReady = !!m.tv_ready;
+    if (m.tv_status) bridgeTvStatus = m.tv_status;
+    applyKinectStatus(!!m.kinect_ok, true);
+  } else if (op === 'hand') {
+    onHandFrame(m);
+  } else if (op === 'tv_autocalib_started') {
+    tvAutoCalRunning = true;
+    tvAutoCalLastInfo = 'Capturing depth frames…';
+    setBridgeStatus('TV auto-calibration: capturing depth…', 'warn');
+    applyTvCalStatusUI();
+  } else if (op === 'tv_autocalib_done') {
+    tvAutoCalRunning = false;
+    bridgeTvReady = !!m.ready;
+    if (m.tv_status) bridgeTvStatus = m.tv_status;
+    tvAutoCalLastInfo = describeAutoCalResult(m);
+    setBridgeStatus('TV calibrated — interaction box live (' + tvAutoCalLastInfo + ')', 'ok');
+    applyTvCalStatusUI();
+  } else if (op === 'tv_autocalib_failed') {
+    tvAutoCalRunning = false;
+    tvAutoCalLastInfo = 'Last attempt failed: ' + (m.reason || 'unknown');
+    setBridgeStatus('TV auto-calibration failed: ' + (m.reason || 'unknown'), 'err');
+    applyTvCalStatusUI();
+  } else if (op === 'tv_calib_reset') {
+    tvAutoCalRunning = false;
+    bridgeTvReady = false;
+    if (m.status) bridgeTvStatus = m.status;
+    tvAutoCalLastInfo = '';
+    applyTvCalStatusUI();
+    setBridgeStatus('TV calibration cleared', 'warn');
+  }
+}
+
+// --- Pinch → paint (reuses the remote server's stamp/stroke protocol) ---
+var pinchActive = false;
+var pinchLastGx = -1, pinchLastGy = -1;
+var pinchQueuedEnd = null;
+var pinchFlushTimer = null;
+var pinchFlushIntervalMs = 1000 / 60;
+var pinchLastFlushAt = 0;
+
+function startPinch(gx, gy) {
+  if (selectedBrushId === null) return;
+  pinchActive = true;
+  pinchLastGx = gx; pinchLastGy = gy;
+  pinchQueuedEnd = null;
+  pinchLastFlushAt = 0;
+  send({ op: 'stamp', id: selectedBrushId, x: gx, y: gy, r: brushSize, erase: false });
+}
+
+function continuePinch(gx, gy) {
+  if (!pinchActive || selectedBrushId === null) return;
+  if (gx === pinchLastGx && gy === pinchLastGy) return;
+  pinchQueuedEnd = [gx, gy];
+  if (pinchFlushTimer !== null) return;
+  var now = performance.now();
+  var delay = Math.max(0, pinchFlushIntervalMs - (now - pinchLastFlushAt));
+  pinchFlushTimer = setTimeout(flushPinchStroke, delay);
+}
+
+function flushPinchStroke() {
+  pinchFlushTimer = null;
+  if (!pinchActive || !pinchQueuedEnd || selectedBrushId === null) return;
+  var gx = pinchQueuedEnd[0], gy = pinchQueuedEnd[1];
+  if (gx !== pinchLastGx || gy !== pinchLastGy) {
+    send({
+      op: 'stroke', id: selectedBrushId,
+      x0: pinchLastGx, y0: pinchLastGy, x1: gx, y1: gy,
+      r: brushSize, erase: false,
+    });
+  }
+  pinchLastGx = gx; pinchLastGy = gy;
+  pinchLastFlushAt = performance.now();
+  pinchQueuedEnd = null;
+}
+
+function endPinch() {
+  if (pinchFlushTimer !== null) { clearTimeout(pinchFlushTimer); pinchFlushTimer = null; }
+  if (pinchQueuedEnd) flushPinchStroke();
+  pinchActive = false;
+  pinchLastGx = -1; pinchLastGy = -1;
+  pinchQueuedEnd = null;
+}
+
+function onHandFrame(m) {
+  if (m.tv_status) bridgeTvStatus = m.tv_status;
+  if (typeof m.tv_ready === 'boolean') bridgeTvReady = m.tv_ready;
+
+  renderOverlay(m);
+  updateKinectDebug(m);
+
+  if (tvAutoCalRunning) {
+    if (pinchActive) endPinch();
+    return;
+  }
+  var haveCanvasPos = (typeof m.cx === 'number' && typeof m.cy === 'number');
+  if (!haveCanvasPos || !m.tracked) {
+    if (pinchActive) endPinch();
+    return;
+  }
+  var gx = Math.max(0, Math.min(W - 1, Math.round(m.cx)));
+  var gy = Math.max(0, Math.min(H - 1, Math.round(m.cy)));
+  if (m.pinch) {
+    if (!pinchActive) startPinch(gx, gy);
+    else continuePinch(gx, gy);
+  } else if (pinchActive) {
+    endPinch();
+  }
+}
+
+// --- Overlay canvas (white ring / red dot cursor) ---
+var overlayCanvas = document.getElementById('overlayCanvas');
+var overlayCtx = overlayCanvas ? overlayCanvas.getContext('2d') : null;
+
+function resizeOverlayCanvas() {
+  if (!overlayCanvas) return;
+  if (overlayCanvas.width !== W) overlayCanvas.width = W;
+  if (overlayCanvas.height !== H) overlayCanvas.height = H;
+}
+
+function clearOverlay() {
+  if (overlayCtx) overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+}
+
+function renderOverlay(m) {
+  if (!overlayCtx) return;
+  resizeOverlayCanvas();
+  overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+  if (!m || typeof m.cx !== 'number' || typeof m.cy !== 'number') return;
+  if (!m.tracked || !m.tv_ready) return;
+  var r = Math.max(5, Math.round(brushSize * 1.8));
+  overlayCtx.save();
+  overlayCtx.lineWidth = 1.5;
+  if (m.pinch) {
+    overlayCtx.fillStyle = 'rgba(255,60,60,0.75)';
+    overlayCtx.strokeStyle = 'rgba(255,255,255,0.95)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, r, 0, Math.PI * 2);
+    overlayCtx.fill(); overlayCtx.stroke();
+  } else {
+    overlayCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, r, 0, Math.PI * 2);
+    overlayCtx.stroke();
+    overlayCtx.fillStyle = 'rgba(255,255,255,0.9)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, 1.5, 0, Math.PI * 2);
+    overlayCtx.fill();
+  }
+  overlayCtx.restore();
+}
+
+function updateKinectDebug(m) {
+  if (!kDebugEnabled || !kinectDebugStats) return;
+  var distCm = (typeof m.tip_signed_dist_m === 'number' && m.tip_signed_dist_m >= 0)
+    ? (m.tip_signed_dist_m * 100).toFixed(1) + 'cm'
+    : '-';
+  var tvLabel = m.tv_ready ? 'ready' : (tvAutoCalRunning ? 'auto-calibrating' : 'not calibrated');
+  kinectDebugStats.textContent =
+    'tracked: ' + (m.tracked ? 'yes' : 'no') +
+    ' | tv: ' + tvLabel +
+    ' | tip→plane: ' + distCm;
+}
+
+// --- TV calibration UI (auto-fit only) ---
+function applyTvCalStatusUI(_handFrame) {
+  if (tvAutoCalBtn) {
+    tvAutoCalBtn.disabled = !!tvAutoCalRunning;
+    tvAutoCalBtn.textContent = tvAutoCalRunning
+      ? 'Auto-Calibrating…'
+      : (bridgeTvReady ? 'Re-run Auto-Calibrate' : 'Auto-Calibrate TV (Depth)');
+  }
+  if (tvAutoCalInfoEl) {
+    if (tvAutoCalRunning) {
+      tvAutoCalInfoEl.textContent = 'Capturing ~1.5s of depth, RANSAC-fitting plane…';
+      tvAutoCalInfoEl.style.color = '#dd6';
+    } else if (tvAutoCalLastInfo) {
+      tvAutoCalInfoEl.textContent = tvAutoCalLastInfo;
+      tvAutoCalInfoEl.style.color = bridgeTvReady ? '#7c7' : '#e88';
+    } else {
+      tvAutoCalInfoEl.textContent = '';
+    }
+  }
+  if (tvCalStatusTextEl) {
+    if (tvAutoCalRunning) {
+      tvCalStatusTextEl.textContent = 'TV: auto-calibrating…';
+      tvCalStatusTextEl.style.color = '#dd6';
+    } else if (bridgeTvReady) {
+      tvCalStatusTextEl.textContent = 'TV: calibrated';
+      tvCalStatusTextEl.style.color = '#7c7';
+    } else {
+      tvCalStatusTextEl.textContent = 'TV: not calibrated';
+      tvCalStatusTextEl.style.color = '#aaa';
+    }
+  }
+  // Legacy on-canvas overlay (no longer used by auto-cal) — keep hidden.
+  if (calOverlayEl) {
+    calOverlayEl.classList.add('hidden');
+    calOverlayEl.innerHTML = '';
+  }
+}
+
+// --- Wire up buttons ---
+if (tvAutoCalBtn) tvAutoCalBtn.onclick = function() {
+  if (tvAutoCalRunning) return;
+  if (!confirm(
+    'Auto-Calibrate TV?\n\n' +
+    '• Make sure the TV screen is fully visible to the Kinect\n' +
+    '• Clear hands / people from view\n' +
+    '• The bridge will capture ~1.5s of depth and fit the dominant plane'
+  )) return;
+  tvAutoCalRunning = true;
+  tvAutoCalLastInfo = 'Capturing depth frames…';
+  applyTvCalStatusUI();
+  sendBridge({ op: 'tv_autocalib_capture' });
+};
+if (tvCalResetBtn) tvCalResetBtn.onclick = function() {
+  if (confirm('Clear stored TV calibration?')) sendBridge({ op: 'tv_calib_reset' });
+};
+if (kDebugToggleBtn) kDebugToggleBtn.onclick = function() { setKDebugEnabled(!kDebugEnabled); };
+
+// --- Canvas corner labels (TL/TR/BR/BL — fixed canvas-side anchors;
+//     bridge-detected corners are A/B/C/D and map to these) ---
+function setCornerLabelsVisible(on) {
+  cornerLabelsVisible = !!on;
+  for (var i = 0; i < cornerLabelEls.length; i++) {
+    var el = cornerLabelEls[i];
+    if (el) el.classList.toggle('hidden', !cornerLabelsVisible);
+  }
+  if (cornerLabelsBtn) {
+    cornerLabelsBtn.textContent = 'Canvas Corners: ' + (cornerLabelsVisible ? 'On' : 'Off');
+  }
+  try { localStorage.setItem('canvasCornerLabels', cornerLabelsVisible ? '1' : '0'); }
+  catch (e) {}
+}
+if (cornerLabelsBtn) {
+  cornerLabelsBtn.onclick = function() { setCornerLabelsVisible(!cornerLabelsVisible); };
+}
+try {
+  var savedCornerLabels = localStorage.getItem('canvasCornerLabels');
+  setCornerLabelsVisible(savedCornerLabels === null ? true : savedCornerLabels === '1');
+} catch (e) {
+  setCornerLabelsVisible(true);
+}
+
+// Initial overlay sizing + kick off bridge connection.
+resizeOverlayCanvas();
+connectBridge();
+</script>
+</body>
+</html>

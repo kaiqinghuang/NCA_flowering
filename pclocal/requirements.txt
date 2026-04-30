@@ -1,0 +1,23 @@
+# PC-local single-process build.
+# Combines the deps of the two services that the remote setup ran in
+# separate processes (nca_server + bridge) into one install.
+#
+# Install torch separately via the official selector for your GPU/CPU
+# build:  https://pytorch.org/get-started/locally/  e.g. on Windows w/
+# CUDA 12.1:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# --- Web stack (shared by NCA server + Kinect bridge) ---
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12.0
+
+# --- NCA server ---
+numpy>=1.26
+Pillow>=10.0
+# torch>=2.1   <- install via the official selector, not pip alone
+
+# --- Kinect bridge (Windows only — pykinect2 ships only Win wheels) ---
+pykinect2>=0.1.0; sys_platform == "win32"
+comtypes>=1.2.0; sys_platform == "win32"
+opencv-python>=4.9

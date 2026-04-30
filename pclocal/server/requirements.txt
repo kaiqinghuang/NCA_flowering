@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+websockets>=12.0
+numpy>=1.24
+Pillow>=10.0
+# Install torch separately via the official selector for your CUDA / ROCm / MPS / CPU build:
+#   https://pytorch.org/get-started/locally/
+# torch>=2.1
