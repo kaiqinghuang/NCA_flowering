@@ -172,7 +172,12 @@ class KinectDepthSource:
             )
             from pykinect2 import PyKinectRuntime
         except Exception as e:  # noqa: BLE001
-            print(f"[kinect-depth] PyKinect2 import failed: {e}")
+            import traceback
+            print(
+                f"[kinect-depth] PyKinect2 import failed: {type(e).__name__}: {e}"
+            )
+            print("[kinect-depth] Full traceback:")
+            traceback.print_exc()
             self._emit_untracked_forever()
             return
 

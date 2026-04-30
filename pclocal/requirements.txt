@@ -18,6 +18,21 @@ Pillow>=10.0
 # torch>=2.1   <- install via the official selector, not pip alone
 
 # --- Kinect bridge (Windows only — pykinect2 ships only Win wheels) ---
+# pykinect2 0.1.0 is from 2017 and unmaintained. It has TWO breakages
+# against any fresh modern Python venv that we patch in-place after
+# install (see pclocal/scripts/patch_pykinect2.ps1):
+#   1. Hardcoded `assert sizeof(struct) == 32-bit-size` lines fail on
+#      64-bit Python (e.g. `AssertionError: 80`). The structs themselves
+#      are fine — only the sanity checks are wrong.
+#   2. The auto-generated bindings sprinkle `_check_version('')` calls;
+#      modern comtypes treats `''` as a version mismatch and raises
+#      `ImportError("Wrong version")`.
+# Both are fixed by commenting the offending lines out — pykinect2's
+# actual COM bindings still work fine against current comtypes.
+#
+# Avoid downgrading comtypes — `comtypes <= 1.1.x` predates Python 3.12
+# and still uses Python-2 `unicode` at module top level, so it explodes
+# with `NameError: name 'unicode' is not defined` on Python 3.13.
 pykinect2>=0.1.0; sys_platform == "win32"
-comtypes>=1.2.0; sys_platform == "win32"
+comtypes>=1.4.0; sys_platform == "win32"
 opencv-python>=4.9

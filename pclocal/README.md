@@ -87,13 +87,31 @@ python -m venv .venv
 
 pip install -r requirements.txt
 
-# Install torch separately for your GPU/CPU. CUDA 12.1 example:
-pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Install torch separately for your GPU/CPU. Pick the index that matches
+# your Python + CUDA from https://pytorch.org/get-started/locally/  e.g.:
+pip install torch --index-url https://download.pytorch.org/whl/cu126
 ```
 
 You also need the **Kinect for Windows v2 SDK 2.0** runtime so PyKinect2
 can talk to the device. See
 <https://www.microsoft.com/en-us/download/details.aspx?id=44561>.
+
+### One-time patch for `pykinect2` on 64-bit Python
+
+`pykinect2 0.1.0` (last updated 2017) has two breakages against any
+modern Python venv. `requirements.txt` already pins `comtypes==1.1.10`
+to dodge one of them; the other (32-bit struct-size asserts) needs a
+post-install patch. Run once per venv:
+
+```powershell
+.\scripts\patch_pykinect2.ps1
+```
+
+The script is idempotent — re-running it is safe. After it prints
+`pykinect2 OK`, the bridge half can talk to the Kinect. Without the
+patch you'll see `[kinect-depth] PyKinect2 import failed: AssertionError: 80`
+in the bridge log. See `scripts/patch_pykinect2.ps1` for the exact
+edits and rationale.
 
 ### Install (macOS / Linux — NCA only, no Kinect)
 
