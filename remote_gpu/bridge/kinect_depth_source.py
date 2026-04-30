@@ -381,7 +381,7 @@ class KinectDepthSource:
                 tf_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_FRONT_PCT", "1.6")
                 tb_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BACK_PCT", "0")
                 tad_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_AD_PCT", "0")
-                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "10")
+                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "0")
                 trim_front = float(tf_env) if tf_env != "" else None
                 trim_back = float(tb_env) if tb_env != "" else None
                 trim_ad = float(tad_env) if tad_env != "" else None
