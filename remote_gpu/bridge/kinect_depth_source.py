@@ -378,10 +378,10 @@ class KinectDepthSource:
                 color_close_px = int(os.environ.get("BRIDGE_AUTOFIT_COLOR_CLOSE_PX", "3"))
                 # Defaults: AD/BC/back = 0, front = 1.5% (bezel on camera side).
                 trim_pct = float(os.environ.get("BRIDGE_AUTOFIT_TRIM_PCT", "0"))
-                tf_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_FRONT_PCT", "1.6")
+                tf_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_FRONT_PCT", "1.8")
                 tb_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BACK_PCT", "0")
-                tad_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_AD_PCT", "0")
-                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "0")
+                tad_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_AD_PCT", "0.5")
+                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "0.5")
                 trim_front = float(tf_env) if tf_env != "" else None
                 trim_back = float(tb_env) if tb_env != "" else None
                 trim_ad = float(tad_env) if tad_env != "" else None
