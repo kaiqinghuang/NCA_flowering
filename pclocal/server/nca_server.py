@@ -75,13 +75,40 @@ PAINT_BATCH_LIMIT = int(os.environ.get("NCA_PAINT_BATCH_LIMIT", "96"))
 # wall-clock drip flow speed unchanged.
 DRIP_EVOLVE_EVERY = int(os.environ.get("NCA_DRIP_EVOLVE_EVERY", "2"))
 SCRIPT_DIR = Path(__file__).parent.resolve()
-_default_models = (SCRIPT_DIR / ".." / ".." / "texture_model").resolve()
-_env_models = os.environ.get("NCA_MODELS_DIR")
-if _env_models:
-    _md = Path(_env_models)
-    MODELS_DIR = _md.resolve() if _md.is_absolute() else (SCRIPT_DIR / _md).resolve()
-else:
-    MODELS_DIR = _default_models
+# Where to look for .npy weights, in priority order:
+#   1. NCA_MODELS_DIR env var (absolute or relative-to-server-dir)
+#   2. Hardcoded absolute paths for known dev machines (so the demo PC
+#      doesn't need any env var to start). Add your own machine's path
+#      to the list below.
+#   3. <repo-root>/texture_model  (i.e. pclocal/../../texture_model)
+#   4. pclocal/texture_model
+# The first candidate that exists AND contains at least one .npy file
+# wins. If nothing matches, we still fall back to candidate #3 so the
+# log clearly shows the expected layout.
+_KNOWN_MODEL_DIRS: list[Path] = [
+    Path(r"C:\Users\xiaoh\Documents\NCA_flowering\texture_model"),
+]
+_FALLBACK_MODEL_DIRS: list[Path] = [
+    (SCRIPT_DIR / ".." / ".." / "texture_model").resolve(),
+    (SCRIPT_DIR / ".." / "texture_model").resolve(),
+]
+
+
+def _pick_models_dir() -> Path:
+    env = os.environ.get("NCA_MODELS_DIR")
+    if env:
+        p = Path(env)
+        return p.resolve() if p.is_absolute() else (SCRIPT_DIR / p).resolve()
+    for cand in _KNOWN_MODEL_DIRS + _FALLBACK_MODEL_DIRS:
+        try:
+            if cand.is_dir() and any(cand.glob("*.npy")):
+                return cand
+        except OSError:
+            continue
+    return _FALLBACK_MODEL_DIRS[0]
+
+
+MODELS_DIR = _pick_models_dir()
 CLIENT_DIR = SCRIPT_DIR.parent / "client"
 
 # Pick best available device (CUDA > MPS > CPU)

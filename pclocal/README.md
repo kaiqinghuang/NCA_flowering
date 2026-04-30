@@ -136,11 +136,40 @@ testing.
 ```powershell
 cd pclocal
 .\.venv\Scripts\activate
-$env:NCA_MODELS_DIR = "..\models"     # or wherever your .npy weights live
 uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
 Then open <http://127.0.0.1:8000/> in a browser.
+
+### Where the NCA models are loaded from
+
+`server\nca_server.py` looks for `.npy` weight files in this order, and
+picks the first directory that exists AND contains at least one `.npy`:
+
+1. `$env:NCA_MODELS_DIR` (env var; absolute, or relative to
+   `pclocal\server\`).
+2. **Hardcoded paths for known dev machines** — see `_KNOWN_MODEL_DIRS`
+   in `nca_server.py`. The demo Windows PC's path
+   (`C:\Users\xiaoh\Documents\NCA_flowering\texture_model`) is already
+   listed there, so on that PC you don't need to set anything — just
+   `uvicorn` and go. To add another machine, append its path to that
+   list and rebuild.
+3. `<repo-root>\texture_model` (i.e. `pclocal\..\..\texture_model`).
+4. `pclocal\texture_model`.
+
+The startup log prints the chosen path and how many `.npy` files were
+found:
+
+```
+[nca_server] models dir: C:\...\texture_model (37 found)
+```
+
+If `(0 found)` appears, the resolver fell all the way through without
+finding any `.npy` — check that the folder really has the weight files
+and either drop them under one of the candidate paths or set
+`NCA_MODELS_DIR` explicitly. The browser "Base A/B/C/D" and "Add Brush"
+dropdowns are populated from that list, so an empty models dir shows up
+in the UI as "no models to load".
 
 The first time you launch it on a new physical setup:
 
@@ -164,7 +193,7 @@ common ones:
 | `NCA_W` / `NCA_H` | `960` / `540` | simulation grid size (also dictates the wire frame size: `W × H × 4` bytes) |
 | `NCA_FPS` | `60` | frame broadcast rate. Up from `30` because we no longer pay for an encode pass per frame. Drop to `30` if your GPU step alone can't hit 60 |
 | `NCA_SPS` | `60` | NCA steps per second |
-| `NCA_MODELS_DIR` | `../texture_model` | folder of `.npy` weights |
+| `NCA_MODELS_DIR` | first match from `_KNOWN_MODEL_DIRS`, then `pclocal\..\..\texture_model`, then `pclocal\texture_model` | folder of `.npy` weights. Override with an **absolute** path if your machine isn't in the hardcoded list. |
 | `NCA_PAINT_QUEUE_MAX` | `4096` | brush-event ring-buffer capacity |
 | `NCA_PAINT_BATCH_LIMIT` | `96` | paint events drained per sim step |
 | `NCA_DRIP_EVOLVE_EVERY` | `2` | spawn/evolve drips every Nth step |
