@@ -139,7 +139,7 @@ def analyze_depth_frame(
     box_near_m: float = 0.02,
     box_far_m: float = 0.45,
     surface_eps_m: float = 0.03,
-    min_box_px: int = 80,
+    min_box_px: int = 200,
     tip_extremum_pct: float = 3.0,
     noise_filter_px: int = 3,
 ) -> dict:
@@ -153,7 +153,10 @@ def analyze_depth_frame(
            breaks the ~1-px filaments that glue the real hand to nearby
            edge-jitter noise.
         3. The cleaned mask is reduced to its largest 8-connected
-           component → ``hand_mask`` (the actual hand silhouette).
+           component → ``hand_mask`` (the actual hand silhouette), but
+           only if that component has at least ``min_box_px`` pixels —
+           smaller blobs are ignored so plane-edge noise does not
+           register as a hand before you enter the box.
         4. **PCA on hand_mask pixels in (u, v) image space** → principal
            axis = the long axis of the hand (finger ↔ wrist).
         5. Project all hand pixels onto the principal axis, take the two

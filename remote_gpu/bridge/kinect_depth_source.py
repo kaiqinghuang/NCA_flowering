@@ -48,7 +48,7 @@ class RawHandFrame:
     t: float                              # wall-clock time when the frame was read
     tracked: bool                         # is a hand currently inside the interaction box
     hand_pos: Tuple[float, float, float]  # fingertip (x, y, z) in Kinect camera meters
-    confident: bool                       # large enough hand blob (≥ 2 × min_box_px)
+    confident: bool                       # large hand blob (≥ max(2×min_box_px, 200) px)
     pinch_dist_direct_m: float = -1.0     # fingertip → TV-plane signed distance (m); -1 if untracked
 
 
@@ -76,6 +76,14 @@ class KinectDepthSource:
         # disables it.
         self._noise_filter_px = int(
             os.environ.get("BRIDGE_DEBUG_NOISE_FILTER_PX", "3")
+        )
+        # Minimum pixels in the largest in-box connected component before
+        # we treat it as a hand (fingertip + tracked + brush). Small
+        # slabs inside the interaction volume (depth speckle on the TV)
+        # stay below this and do not trigger tracking.
+        self._hand_min_px = max(
+            40,
+            min(8000, int(os.environ.get("BRIDGE_HAND_MIN_PX", "200"))),
         )
         # Temporal EMA on the fingertip 3D position + image-space (u,v),
         # to suppress sub-frame jitter. α = 1.0 disables smoothing (raw),
@@ -199,6 +207,7 @@ class KinectDepthSource:
                 box_far_m=self.box_far_m,
                 surface_eps_m=self._surface_eps_m,
                 noise_filter_px=self._noise_filter_px,
+                min_box_px=self._hand_min_px,
             )
 
             now = time.time()
@@ -372,7 +381,7 @@ class KinectDepthSource:
                 tf_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_FRONT_PCT", "1.6")
                 tb_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BACK_PCT", "0")
                 tad_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_AD_PCT", "0")
-                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "0.9")
+                tbc_env = os.environ.get("BRIDGE_AUTOFIT_TRIM_BC_PCT", "0")
                 trim_front = float(tf_env) if tf_env != "" else None
                 trim_back = float(tb_env) if tb_env != "" else None
                 trim_ad = float(tad_env) if tad_env != "" else None

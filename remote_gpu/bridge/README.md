@@ -183,6 +183,7 @@ Toggle **Debug View: On** in the sidebar (`/debug/depth.jpg`). You'll see:
 | `BRIDGE_DEPTH_BAND_MAX_M` | `0.45` | far edge of the interaction box (m above plane) |
 | `BRIDGE_DEBUG_SURFACE_EPS_M` | `0.03` | thickness of the magenta "TV slab" in the debug overlay |
 | `BRIDGE_DEBUG_NOISE_FILTER_PX` | `3` | morph-open kernel (px) applied to the in-box mask before largest-CC. Stabilizes the fingertip pick by stripping single-pixel specks and ~1-px filaments that connect the hand to edge noise. Set to `0` or `1` to disable |
+| `BRIDGE_HAND_MIN_PX` | `200` | minimum pixel count of the largest in-box blob before fingertip tracking (red dot + canvas brush) activates. Raise (e.g. `280`) if small noise patches inside the box still latch; lower if your hand must register sooner at the edge of the box |
 | `BRIDGE_TIP_EMA_ALPHA` | `0.5` | temporal EMA factor on the fingertip 3D position (and debug u,v). `1.0` = no smoothing (raw); lower = more smoothing. Try `0.3` if the red square still jitters, `0.7` if it feels laggy |
 | `BRIDGE_AUTOFIT_EPS_M` | `0.015` | on-plane tolerance during auto-calibration |
 | `BRIDGE_AUTOFIT_OPEN_PX` | `3` | morph-open kernel (px) on the on-plane mask |
