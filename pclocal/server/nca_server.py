@@ -31,13 +31,19 @@ Protocol (single bidirectional WS at /ws):
     Binary frame: raw RGBA bytes, ``len == W * H * 4`` (latest render).
     JSON text:    {"type": "status", ...} ack/diagnostics
 
-A separate asyncio task runs the NCA loop at TARGET_STEPS_PER_SEC and
-hands a fresh RGBA buffer to clients at TARGET_FPS.
+Runtime architecture (commit 42b348b — empirically the smoothest on
+RTX-4080-class hardware):
+    Two independent worker threads + two independent asyncio pacers.
+        * `sim_loop`       → `STEP_EXECUTOR`   → `_step_blocking`
+        * `broadcast_loop` → `RENDER_EXECUTOR` → `_render_raw_blocking`
+    Each loop owns its own clock, so step rate and frame rate are fully
+    decoupled; the broadcast loop renders + sends a fresh RGBA buffer
+    on every tick, regardless of whether the simulator advanced since
+    the last frame.
 """
 from __future__ import annotations
 
 import asyncio
-import ctypes
 import json
 import os
 import socket as _socket
@@ -61,35 +67,20 @@ from npy_loader import load_model
 # ---------- Config (override via env) ----------
 H = int(os.environ.get("NCA_H", "540"))
 W = int(os.environ.get("NCA_W", "960"))
-# Local build: 60 fps / 20 sps default, tuned for an RTX 4080-class PC.
-# FPS and SPS are *intentionally decoupled* — they control different things.
+# Defaults tuned for an RTX 4080-class PC. Override with NCA_FPS / NCA_SPS
+# env vars per machine.
 #
-#   * NCA_FPS = render/broadcast rate. This is the visual refresh rate
-#     the user perceives — Kinect cursor smoothness, paint stroke
-#     liveness, overall "the screen feels alive" feel. Each broadcast
-#     sends a fresh snapshot of `sim.state`, even if the state hasn't
-#     advanced since the last broadcast (cheap — render cost is a
-#     ~2ms GPU clamp+transfer on a 4080, no NCA work). 60 fps matches
-#     the typical monitor refresh and keeps Kinect motion fluid.
+#   * NCA_FPS = render/broadcast rate. Each tick the broadcast loop
+#     submits a fresh GPU→CPU readback regardless of whether NCA ticked.
+#     60 fps matches monitor refresh and keeps Kinect motion fluid.
 #
 #   * NCA_SPS = how often the NCA simulator actually steps forward.
-#     This is the *aesthetic pace* of evolution — how fast patterns
-#     grow, how fast drips flow. It's also the single biggest driver
-#     of GPU load: a brush-active step on a 4080 is ~30–50ms (one
-#     depthwise conv + per-model mixing per active brush). 20 sps
-#     keeps that under ~50% GPU duty even when several brushes light
-#     up, which is what gives the loop room to stay un-jittery.
+#     Drives the *aesthetic pace* of evolution and is the dominant GPU
+#     load knob. 20 keeps a 4080 well under-budget even when several
+#     brush models become active simultaneously.
 #
-# Default 60/20 rationale on a 4080:
-#   * 60 fps × ~2ms render ≈ 120ms/s render work (~12%). Cheap.
-#   * 20 sps × ~30ms step    ≈ 600ms/s step work (~60% peak). Has
-#     headroom for paint-event spikes; if you push higher you start
-#     phase-locking when many brushes activate.
-#
-# If you want NCA visibly slower (more deliberate evolution) drop SPS
-# to 10. If you want it livelier without changing pacing, push the UI
-# **Speed** slider (`steps_per_frame`) so each tick runs multiple NCA
-# substeps. Override with NCA_FPS / NCA_SPS env vars per machine.
+# Drop both (e.g. 30 / 10) if you're on a slower GPU and seeing step_ms
+# spike past the per-step budget.
 TARGET_FPS = float(os.environ.get("NCA_FPS", "60"))
 TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "20"))
 PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
@@ -181,19 +172,12 @@ else:
 app = FastAPI()
 sim = NCASimulator(Params(H=H, W=W), DEVICE)
 STEP_EXECUTOR: Optional[ThreadPoolExecutor] = None
+RENDER_EXECUTOR: Optional[ThreadPoolExecutor] = None
 
 # Frame protocol constants advertised in the hello message. Clients
 # read these to size their ImageData buffer.
 FRAME_FORMAT = "rgba8"            # raw 8-bit RGBA, row-major, top-left origin
 FRAME_BYTES = W * H * 4           # bytes per frame on the wire
-
-# Latest fully-rendered RGBA frame, produced by the step thread right after
-# each NCA step (Fix B). The broadcast loop just hands this bytes object to
-# clients at TARGET_FPS pacing — no GPU work happens on the asyncio side.
-# `bytes` assignment is atomic under the GIL, so a single global reference
-# is enough for cross-thread publication; readers always see either the old
-# or the new pointer, never a torn value.
-_latest_rgba: Optional[bytes] = None
 
 
 class ClientConnection:
@@ -221,43 +205,6 @@ clients_lock = asyncio.Lock()
 paint_queue = deque(maxlen=PAINT_QUEUE_MAX)
 paint_queue_lock = threading.Lock()
 _drip_tick = 0
-
-
-# ---------- Windows multimedia timer resolution (Fix A) ----------
-# Windows' default scheduling tick is ~15.6ms, so `asyncio.sleep(0.023)`
-# (the 33ms broadcast pacer minus a 10ms render) actually sleeps 31ms,
-# and `asyncio.sleep(0.069)` (the 100ms sim pacer minus a 30ms step)
-# actually sleeps 78–94ms. That alone caps SPS at ~9 and FPS at ~22 with
-# ±15ms jitter, which is what we were seeing in perf logs even when the
-# GPU had plenty of headroom. timeBeginPeriod(1) drops the kernel
-# scheduler tick to 1ms system-wide; sleep precision on the asyncio loop
-# follows. NB: this is a process-global Windows setting; we restore it
-# on shutdown to be a polite citizen.
-WIN_TIMER_PERIOD_MS = 1
-_win_timer_active = False
-
-
-def _try_set_windows_timer_resolution(period_ms: int) -> bool:
-    """Bump Windows multimedia timer resolution. No-op on non-Windows."""
-    if os.name != "nt":
-        return False
-    try:
-        winmm = ctypes.WinDLL("winmm")
-        rc = winmm.timeBeginPeriod(period_ms)
-        return rc == 0  # TIMERR_NOERROR
-    except Exception:
-        return False
-
-
-def _try_clear_windows_timer_resolution(period_ms: int) -> None:
-    """Undo a prior timeBeginPeriod call. No-op on non-Windows."""
-    if os.name != "nt":
-        return
-    try:
-        winmm = ctypes.WinDLL("winmm")
-        winmm.timeEndPeriod(period_ms)
-    except Exception:
-        pass
 
 
 def _try_set_tcp_nodelay(ws: WebSocket) -> bool:
@@ -447,22 +394,12 @@ async def ws_endpoint(ws: WebSocket):
 
 
 # ---------- Background simulation + broadcast ----------
-# Per-second perf counters. After Fix B the step thread does both the
-# NCA step and the render, so we track them as separate phases:
-#   * `calls`   = number of `_step_blocking` invocations (≈ TARGET_SPS)
-#   * `steps`   = NCA steps executed (= calls × steps_per_frame, used for sps)
-#   * `renders` = renders done in the step thread (= calls when there's
-#                 at least one client; 0 otherwise — we skip the render
-#                 phase entirely when nobody is connected to save GPU)
-#   * `frames`  = unique RGBA payloads pushed to clients by broadcast_loop
-#                 (skip-duplicate: equals min(SPS, TARGET_FPS) when active)
+# Per-second perf counters
 _perf = {
-    "calls": 0,
     "steps": 0,
-    "renders": 0,
     "frames": 0,
-    "step_ms": 0.0,
     "render_ms": 0.0,
+    "step_ms": 0.0,
     "paint_applied": 0,
     "paint_dropped": 0,
     "last": time.perf_counter(),
@@ -486,51 +423,9 @@ def _drain_paint_events(limit: int) -> list[dict]:
     return out
 
 
-def _render_to_bytes() -> bytes:
-    """Snapshot NCA state and return a packed RGBA byte buffer ready for WS.
-
-    Returns ``W * H * 4`` bytes (row-major, R,G,B,255 per pixel) ready to
-    feed straight into the browser's ``putImageData`` — no encoder, no
-    compression, no quality knob. Pixel values are exactly what the NCA
-    simulator produced this tick.
-
-    Called from the step thread immediately after the NCA step completes
-    (Fix B). Both the step writes and this render now run on the same
-    CUDA default stream in the same thread, so the implicit `.cpu()` sync
-    only waits for *this thread's* ops — no cross-thread GPU contention.
-    """
-    with sim.lock:
-        state_snap = sim.state.detach().clone()
-        if sim.p.show_mask_tint and sim.mask is not None:
-            tint_snap = sim._compose_tint().detach().clone()
-        else:
-            tint_snap = None
-    rgb = state_snap[0, :3].clamp(-1, 1).mul(0.5).add(0.5)
-    if tint_snap is not None:
-        rgb = rgb * 0.76 + tint_snap * 0.24
-    rgb_u8 = rgb.clamp(0, 1).mul(255).to(torch.uint8)            # (3, H, W)
-    alpha = torch.full((1, H, W), 255, dtype=torch.uint8, device=rgb_u8.device)
-    rgba = torch.cat([rgb_u8, alpha], dim=0).permute(1, 2, 0).contiguous()
-    return rgba.cpu().numpy().tobytes()
-
-
 def _step_blocking():
-    """Run one NCA step batch + render in a single worker thread.
-
-    Per Fix B, the render runs in this same thread on the CUDA default
-    stream right after the step. This eliminates the GPU-stream contention
-    that caused render's `.cpu()` to wait for step's conv2d (and vice
-    versa) when they were on different threads, and removes the
-    "phase-locking" failure mode where the two loops aligned and the
-    effective FPS halved.
-
-    Side effect: writes the rendered RGBA payload to the module-global
-    `_latest_rgba`. The broadcast loop (asyncio side) only paces sends
-    and never touches the GPU.
-    """
-    global _latest_rgba
-    t_call_start = time.perf_counter()
-
+    """Run one batch of NCA steps in a worker thread (releases asyncio loop)."""
+    t0 = time.perf_counter()
     # Apply queued brush ops inside the step thread to avoid lock contention with WS.
     events = _drain_paint_events(PAINT_BATCH_LIMIT)
     for ev in events:
@@ -559,24 +454,48 @@ def _step_blocking():
         n = max(1, sim.p.steps_per_frame)
         for _ in range(n):
             sim.step()
-    # Sync here so `step_ms` reflects real GPU completion (without this,
-    # CUDA work would still be queued and the actual cost would land
-    # inside the render's `.cpu()` instead).
     if torch.cuda.is_available():
         torch.cuda.synchronize()
-    t_step_end = time.perf_counter()
-    _perf["step_ms"] += (t_step_end - t_call_start) * 1000.0
+    _perf["step_ms"] += (time.perf_counter() - t0) * 1000.0
     _perf["steps"] += n
-    _perf["calls"] += 1
 
-    # Render right after step on the same default stream. Skip entirely
-    # when nobody's connected so we don't burn GPU on bytes nobody reads.
-    # (`len(set)` is a single int read under the GIL — no lock needed.)
-    if len(clients) > 0:
-        payload = _render_to_bytes()  # `.cpu()` inside is the implicit sync
-        _latest_rgba = payload
-        _perf["render_ms"] += (time.perf_counter() - t_step_end) * 1000.0
-        _perf["renders"] += 1
+
+def _render_raw_blocking() -> bytes:
+    """Snapshot NCA state on GPU under sim lock, then transfer to a flat
+    RGBA byte buffer.
+
+    Returns ``W * H * 4`` bytes (row-major, R,G,B,255 per pixel) ready to
+    feed straight into the browser's ``putImageData`` — no encoder, no
+    compression, no quality knob. Pixel values are exactly what the NCA
+    simulator produced this tick.
+
+    Concurrency:
+        - Lock window is short: just a tensor clone (kernel-queue submit
+          on the device, returns immediately on CUDA / MPS).
+        - GPU→CPU transfer + alpha pad happens outside the lock so the
+          step thread isn't blocked waiting on GPU sync.
+    """
+    t0 = time.perf_counter()
+    with sim.lock:
+        state_snap = sim.state.detach().clone()
+        if sim.p.show_mask_tint and sim.mask is not None:
+            tint_snap = sim._compose_tint().detach().clone()
+        else:
+            tint_snap = None
+    rgb = state_snap[0, :3].clamp(-1, 1).mul(0.5).add(0.5)
+    if tint_snap is not None:
+        rgb = rgb * 0.76 + tint_snap * 0.24
+    rgb_u8 = rgb.clamp(0, 1).mul(255).to(torch.uint8)            # (3, H, W)
+    # Pad an opaque alpha channel on-device, then transfer one (H, W, 4)
+    # block. One contiguous CPU array → no extra copy when we hand it to
+    # FastAPI's send_bytes (it'll bytes() the buffer once).
+    alpha = torch.full((1, H, W), 255, dtype=torch.uint8, device=rgb_u8.device)
+    rgba = torch.cat([rgb_u8, alpha], dim=0).permute(1, 2, 0).contiguous()
+    rgba_np = rgba.cpu().numpy()                                  # (H, W, 4) uint8
+    payload = rgba_np.tobytes()
+    _perf["render_ms"] += (time.perf_counter() - t0) * 1000.0
+    _perf["frames"] += 1
+    return payload
 
 
 async def perf_loop():
@@ -589,16 +508,11 @@ async def perf_loop():
             continue
         sps = _perf["steps"] / dt
         fps = _perf["frames"] / dt
-        # Per-call averages: step_ms is accumulated per `_step_blocking`
-        # invocation, divided by call count; render_ms is only added when
-        # there's at least one client (so we divide by `renders`, not
-        # `calls`, to avoid showing 0.00 when nobody is connected).
-        avg_step = _perf["step_ms"] / max(1, _perf["calls"])
-        avg_render = _perf["render_ms"] / max(1, _perf["renders"])
+        avg_step = _perf["step_ms"] / max(1, _perf["steps"])
+        avg_render = _perf["render_ms"] / max(1, _perf["frames"])
         with paint_queue_lock:
             queued = len(paint_queue)
-        # frame_mb = bytes/sec actually pushed to clients (skip-duplicate
-        # means this drops to ~0 when SPS=0 even if FPS target is high).
+        # frame_mb = bytes/sec on the wire (uncompressed RGBA)
         frame_mb_s = fps * FRAME_BYTES / 1_048_576.0
         print(
             f"[perf] sps={sps:5.1f}  fps={fps:4.1f}  step_avg={avg_step:5.2f}ms  "
@@ -606,9 +520,7 @@ async def perf_loop():
             f"paint={_perf['paint_applied']} drop={_perf['paint_dropped']} "
             f"q={queued} clients={len(clients)}"
         )
-        _perf["calls"] = 0
         _perf["steps"] = 0
-        _perf["renders"] = 0
         _perf["frames"] = 0
         _perf["step_ms"] = 0.0
         _perf["render_ms"] = 0.0
@@ -634,46 +546,32 @@ async def sim_loop():
 
 
 async def broadcast_loop():
-    """Pace network sends at TARGET_FPS — no GPU work happens here.
-
-    Per Fix B, the step thread renders right after each NCA step and
-    publishes the resulting RGBA bytes to `_latest_rgba`. This loop just
-    copies that reference into per-client send queues at the configured
-    FPS rate.
-
-    Skip-duplicate: when SPS < TARGET_FPS (e.g. SPS=10, FPS=30), the same
-    payload reference would otherwise be sent multiple times. We compare
-    by identity (`is`) — any new render publishes a fresh `bytes` object,
-    so an unchanged reference means the NCA hasn't advanced and there's
-    nothing new to deliver. Skipping those duplicate sends:
-        * frees the asyncio loop / WS layer from pointless 2 MB writes
-          (which was a real source of jitter in the old setup), and
-        * spares the browser putImageData calls on identical pixels.
-
-    Net effect: `fps` perf counter reports min(SPS, TARGET_FPS) — the
-    rate at which the user actually sees new content.
-    """
+    """Render + send the current frame at TARGET_FPS — render runs in a
+    worker thread. Each client gets at most one un-sent frame queued; if
+    it's still un-sent when the next frame is ready we replace the stale
+    one with the fresh one (browser tab in background, etc.)."""
+    loop = asyncio.get_running_loop()
     interval = 1.0 / TARGET_FPS
     next_t = time.perf_counter()
-    last_sent: Optional[bytes] = None
     while True:
-        payload = _latest_rgba
-        if payload is not None and payload is not last_sent and clients:
-            async with clients_lock:
-                for client in clients:
-                    try:
-                        client.queue.put_nowait(payload)
-                    except asyncio.QueueFull:
-                        try:
-                            _ = client.queue.get_nowait()
-                        except asyncio.QueueEmpty:
-                            continue
+        if clients and sim.count_loaded_models() > 0:
+            try:
+                payload = await loop.run_in_executor(RENDER_EXECUTOR, _render_raw_blocking)
+                async with clients_lock:
+                    for client in clients:
                         try:
                             client.queue.put_nowait(payload)
                         except asyncio.QueueFull:
-                            pass
-            last_sent = payload
-            _perf["frames"] += 1
+                            try:
+                                _ = client.queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                continue
+                            try:
+                                client.queue.put_nowait(payload)
+                            except asyncio.QueueFull:
+                                pass
+            except Exception as e:
+                print(f"[broadcast] render/send failed: {e}")
         next_t += interval
         delay = next_t - time.perf_counter()
         if delay > 0:
@@ -684,7 +582,7 @@ async def broadcast_loop():
 
 @app.on_event("startup")
 async def on_startup():
-    global STEP_EXECUTOR, _win_timer_active
+    global STEP_EXECUTOR, RENDER_EXECUTOR
     raw_mb_per_s = TARGET_FPS * FRAME_BYTES / 1_048_576.0
     print(
         f"[nca_server] device={DEVICE} grid={W}×{H} fps={TARGET_FPS} "
@@ -699,16 +597,9 @@ async def on_startup():
         f"[nca_server] brush models dir: {BRUSH_MODELS_DIR} "
         f"({len(list_available_brush_models())} .npy found)"
     )
-    _win_timer_active = _try_set_windows_timer_resolution(WIN_TIMER_PERIOD_MS)
-    print(
-        f"[nca_server] win_timer_{WIN_TIMER_PERIOD_MS}ms="
-        f"{'on' if _win_timer_active else 'off (non-Windows or failed)'}"
-    )
-    # Single dedicated thread for the combined step+render work. We no longer
-    # use a separate render executor — render now runs in this thread right
-    # after each step on the same CUDA default stream, eliminating the GPU
-    # contention / phase-locking that produced the uneven FPS pattern.
+    # Dedicated single-thread executors keep step/render timing stable.
     STEP_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nca-step")
+    RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nca-render")
     asyncio.create_task(sim_loop())
     asyncio.create_task(broadcast_loop())
     asyncio.create_task(perf_loop())
@@ -718,8 +609,8 @@ async def on_startup():
 async def on_shutdown():
     if STEP_EXECUTOR is not None:
         STEP_EXECUTOR.shutdown(wait=False, cancel_futures=True)
-    if _win_timer_active:
-        _try_clear_windows_timer_resolution(WIN_TIMER_PERIOD_MS)
+    if RENDER_EXECUTOR is not None:
+        RENDER_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 # ---------- Static client ----------

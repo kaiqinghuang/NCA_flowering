@@ -1212,10 +1212,13 @@ function renderOverlay(m) {
   overlayCtx.save();
   overlayCtx.lineWidth = 1.5;
   if (m.pinch) {
-    overlayCtx.fillStyle = 'rgba(255,60,60,0.75)';
-    overlayCtx.strokeStyle = 'rgba(255,255,255,0.95)';
-    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, r, 0, Math.PI * 2);
-    overlayCtx.fill(); overlayCtx.stroke();
+    // Pinch (painting) cursor: solid red dot only — no white outline.
+    // Sized smaller than the brush ring so it reads as a fingertip,
+    // not as the brush radius itself.
+    var pinchR = Math.max(3, Math.round(brushSize * 1.1));
+    overlayCtx.fillStyle = 'rgba(255,60,60,0.85)';
+    overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, pinchR, 0, Math.PI * 2);
+    overlayCtx.fill();
   } else {
     overlayCtx.strokeStyle = 'rgba(255,255,255,0.9)';
     overlayCtx.beginPath(); overlayCtx.arc(m.cx, m.cy, r, 0, Math.PI * 2);
