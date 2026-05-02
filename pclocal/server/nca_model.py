@@ -97,7 +97,7 @@ class Params:
     spray_drip_wobble: float = 0.25     # 0..1, sideways drift while dripping
     spray_drip_min_width: float = 1.0
     spray_drip_chance: float = 0.12     # per-stamp spawn prob once wet > threshold
-    drip_gravity: int = 0               # 0=down, 1=up, 2=left, 3=right
+    drip_gravity: int = 2               # 0=down, 1=up, 2=left, 3=right
     disturbance: bool = False
     show_mask_tint: bool = False
     active: bool = True

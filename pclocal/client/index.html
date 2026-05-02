@@ -687,7 +687,7 @@ bindRange('spRadRange', 'spRadVal', 'set_param', 'spray_splatter_radius');
 bindRange('dripThrRange', 'dripThrVal', 'set_param', 'spray_drip_threshold', function(x) { return x / 100; });
 bindRange('dripSpdRange', 'dripSpdVal', 'set_param', 'spray_drip_speed', function(x) { return x / 100; });
 
-var dripGravity = 0;
+var dripGravity = 2;  // default = left (matches server's Params.drip_gravity)
 function updateDripDirBtns() {
   var btns = document.querySelectorAll('.dripDirBtn');
   btns.forEach(function(b) {
