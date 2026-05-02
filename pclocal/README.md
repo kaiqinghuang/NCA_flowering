@@ -33,7 +33,7 @@ bytes (`H × W × 4`) and skip the encoder entirely.
 |---|---|---|
 | frame transport | adaptive WebP/JPEG over WAN WS | raw RGBA over loopback WS |
 | bytes per frame (960×540) | ~30–60 KB (Q=68–92) | 2.07 MB (no compression) |
-| bandwidth @ default fps | ~3 MB/s @ 30 fps | ~30 MB/s @ 15 fps (loopback can do ≫1 GB/s) |
+| bandwidth @ default fps | ~3 MB/s @ 30 fps | ~60 MB/s @ 30 fps (loopback can do ≫1 GB/s) |
 | encode CPU on server | 5–10 ms / frame | 0 |
 | client-side decode | `createImageBitmap` ~3–5 ms | `putImageData` ~1–2 ms |
 | visible artifacts | yes (DCT blocks, chroma noise) | none — pixel-perfect |
@@ -191,8 +191,8 @@ common ones:
 | Var | Default | Effect |
 |---|---|---|
 | `NCA_W` / `NCA_H` | `960` / `540` | simulation grid size (also dictates the wire frame size: `W × H × 4` bytes) |
-| `NCA_FPS` | `15` | frame broadcast rate. Intentionally low — see `NCA_SPS`. Bump up if your GPU has headroom. |
-| `NCA_SPS` | `15` | NCA steps per second. Defaults are *intentionally slow* so each frame lands on time and the sim looks "evenly slow" rather than "fast but stuttery". On Apple Silicon at 960×540 a step costs ~25ms (≈40 sps theoretical max), and at 60 sps the loop falls behind & jitters. To temporarily speed up evolution without raising sps, push the UI **Speed** slider (`steps_per_frame`). |
+| `NCA_FPS` | `30` | render/broadcast rate — controls visual refresh smoothness (Kinect cursor liveness, paint stroke responsiveness). Cheap (~10ms render per frame), so this can stay high independent of `NCA_SPS`. |
+| `NCA_SPS` | `10` | NCA steps per second — controls *how fast the simulation evolves* (pattern growth, drip flow). Each step costs ~20–25ms on Apple Silicon at 960×540, so this is the main GPU-load knob. Kept intentionally low so the sim looks calm and never overruns its budget. To bump evolution rate without changing the loop pacing, push the UI **Speed** slider (`steps_per_frame`) — Speed=3 + sps=10 ≈ 30 sps of NCA evolution. |
 | `NCA_MODELS_DIR` | first match from `_KNOWN_MODEL_DIRS`, then `pclocal\..\..\texture_model`, then `pclocal\texture_model` | folder of `.npy` weights. Override with an **absolute** path if your machine isn't in the hardcoded list. |
 | `NCA_PAINT_QUEUE_MAX` | `4096` | brush-event ring-buffer capacity |
 | `NCA_PAINT_BATCH_LIMIT` | `96` | paint events drained per sim step |
@@ -222,7 +222,7 @@ Highlights:
 | Frame quality | lossy (DCT artifacts) | **pixel-perfect** (no encoder) |
 | Server-side encode CPU | 5–10 ms/frame | 0 |
 | Client-side decode CPU | `createImageBitmap` ~3–5 ms | `putImageData` ~1–2 ms |
-| Default FPS | 30 | 15 (intentionally slow — see `NCA_SPS` notes) |
+| Default FPS / SPS | 30 / 30 | 30 / 10 (decoupled — visual refresh stays smooth, NCA evolution is intentionally calm) |
 | Latency | 30–80 ms typical | 5–15 ms |
 | Hand events | bridge → server → ⚠ user pastes URL | bridge → same app, automatic |
 | Adaptive quality controller | yes | removed |
@@ -242,11 +242,13 @@ as copies of the remote ones; the edits are:
   * Adaptive-quality controller (`_aq`, `_aq_record`, `_aq_tick`) and
     its env vars (`NCA_WEBP_Q`, `NCA_ADAPTIVE_*`) deleted.
   * `hello` advertises `frame_format` + `frame_bytes`.
-  * Default `NCA_FPS` / `NCA_SPS` set to `15` (was 60). Picked so each
-    frame fits inside the per-step GPU budget — sim runs *intentionally
-    slow but evenly*, instead of trying to hit 60 sps and stuttering at
-    ~12 actual sps. See the long comment above the constants in
-    `nca_server.py`.
+  * Default `NCA_FPS` / `NCA_SPS` decoupled to `30` / `10` (was both
+    60). The render/broadcast loop stays at 30 fps so the canvas
+    refreshes smoothly alongside the ~30Hz Kinect hand stream, while
+    the NCA simulator only ticks 10×/sec so each step has plenty of
+    GPU budget and never overruns. Result: smooth-feeling visuals with
+    a calm, deliberate pattern-evolution pace. See the long comment
+    above the constants in `nca_server.py`.
 * **`pclocal/bridge/kinect_depth_source.py`** —
   `KinectDepthSource.start()` made idempotent (no-op if already
   running) so it's safe under the new lifespan chaining.
