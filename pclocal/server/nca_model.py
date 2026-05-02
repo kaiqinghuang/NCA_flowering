@@ -713,6 +713,26 @@ class NCASimulator:
             bm.active = False
             self.mask_dirty = True
 
+    def clear_all_brush_masks(self):
+        """Wipe every brush's deposit, drips, and ownership in one shot.
+
+        Equivalent to calling `clear_brush_mask` on every loaded brush, but
+        we hold the sim lock once and do a single ownership reset so the
+        cost stays O(grid) instead of O(grid * n_brushes) and there's no
+        intermediate frame where some brushes are cleared and others
+        aren't (which would briefly flash old colors during render).
+        Leaves the brushes themselves loaded — only their painted state is
+        cleared.
+        """
+        with self.lock:
+            for bm in self.brush_models:
+                bm.mask.zero_()
+                bm.accum.zero_()
+                bm.drips.clear()
+                bm.active = False
+            self.stroke_owner.fill_(-1)
+            self.mask_dirty = True
+
     def clear_state(self):
         with self.lock:
             self.state.zero_()

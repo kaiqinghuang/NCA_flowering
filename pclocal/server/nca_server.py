@@ -6,7 +6,7 @@ is sent as **raw RGBA bytes** (length = ``W * H * 4``) over a loopback
 WebSocket, and the browser blits it directly to a canvas via
 ``putImageData``. No JPEG/WebP encoder, no compression artifacts, no
 adaptive-quality controller — every pixel on screen is the exact NCA
-output. At 960×540 / 30 fps the loopback bandwidth is ~60 MB/s, well
+output. At 960×540 / 60 fps the loopback bandwidth is ~120 MB/s, well
 within what the kernel handles for free.
 
 Run:
@@ -22,6 +22,7 @@ Protocol (single bidirectional WS at /ws):
     {"op": "select_brush", "id": int}
     {"op": "stamp", "id": int, "x": int, "y": int, "r": float, "erase": bool}
     {"op": "clear_brush", "id": int}
+    {"op": "clear_all_brushes"}                       # wipe every brush's paint
     {"op": "clear_state"}
     {"op": "set_param", "name": "...", "value": <number|bool>}
     {"op": "reseed"}
@@ -60,45 +61,37 @@ from npy_loader import load_model
 # ---------- Config (override via env) ----------
 H = int(os.environ.get("NCA_H", "540"))
 W = int(os.environ.get("NCA_W", "960"))
-# Local build: 30 fps / 10 sps default. FPS and SPS are *intentionally
-# decoupled* — they control different things.
+# Local build: 60 fps / 20 sps default, tuned for an RTX 4080-class PC.
+# FPS and SPS are *intentionally decoupled* — they control different things.
 #
 #   * NCA_FPS = render/broadcast rate. This is the visual refresh rate
 #     the user perceives — Kinect cursor smoothness, paint stroke
 #     liveness, overall "the screen feels alive" feel. Each broadcast
 #     sends a fresh snapshot of `sim.state`, even if the state hasn't
 #     advanced since the last broadcast (cheap — render cost is a
-#     ~10ms GPU clamp+transfer, no NCA work). Keep this comfortably
-#     above ~24 fps so motion looks continuous.
+#     ~2ms GPU clamp+transfer on a 4080, no NCA work). 60 fps matches
+#     the typical monitor refresh and keeps Kinect motion fluid.
 #
 #   * NCA_SPS = how often the NCA simulator actually steps forward.
 #     This is the *aesthetic pace* of evolution — how fast patterns
 #     grow, how fast drips flow. It's also the single biggest driver
-#     of GPU load: each step costs ~20–25ms on Apple Silicon at
-#     960×540 (one big depthwise conv + per-model mixing). Targeting
-#     anything close to the per-step budget guarantees stutter, so we
-#     keep this well below the ceiling.
+#     of GPU load: a brush-active step on a 4080 is ~30–50ms (one
+#     depthwise conv + per-model mixing per active brush). 20 sps
+#     keeps that under ~50% GPU duty even when several brushes light
+#     up, which is what gives the loop room to stay un-jittery.
 #
-# Default 30/10:
-#   * 30 fps × ~10ms render = 300ms/s render work (~30% of the render
-#     thread). Gives a smooth-feeling canvas matched to the ~30Hz
-#     Kinect hand stream.
-#   * 10 sps × ~25ms step = 250ms/s step work (~25%). Plenty of GPU
-#     headroom for paint-event spikes and drip evolution. The sim
-#     evolves at a calm, deliberate pace — patterns drift visibly but
-#     never feel "frantic", which fits the slow-painting aesthetic.
+# Default 60/20 rationale on a 4080:
+#   * 60 fps × ~2ms render ≈ 120ms/s render work (~12%). Cheap.
+#   * 20 sps × ~30ms step    ≈ 600ms/s step work (~60% peak). Has
+#     headroom for paint-event spikes; if you push higher you start
+#     phase-locking when many brushes activate.
 #
-# Side-effect on drips: `spawn_drips`'s `base_speed` was tuned around
-# the original 60-sps loop, so at sps=10 drips advance ~6× slower in
-# wall-clock time. If you want them livelier, push the UI **Drip spd**
-# slider higher; you can also raise the **Speed** slider
-# (`steps_per_frame`) to run multiple NCA steps per sim tick without
-# bumping NCA_SPS — e.g. Speed=3 + sps=10 evolves NCA at the equivalent
-# of ~30 sps while keeping the loop pacing & GPU spike profile of 10.
-#
-# Override with NCA_FPS / NCA_SPS env vars per machine.
-TARGET_FPS = float(os.environ.get("NCA_FPS", "30"))
-TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "10"))
+# If you want NCA visibly slower (more deliberate evolution) drop SPS
+# to 10. If you want it livelier without changing pacing, push the UI
+# **Speed** slider (`steps_per_frame`) so each tick runs multiple NCA
+# substeps. Override with NCA_FPS / NCA_SPS env vars per machine.
+TARGET_FPS = float(os.environ.get("NCA_FPS", "60"))
+TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "20"))
 PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
 # Cap how many paint events one step can drain. Lower value = smoother
 # step times during fast painting (excess events queue up and get processed
@@ -376,6 +369,8 @@ async def handle_message(ws: WebSocket, msg: dict):
         })
     elif op == "clear_brush":
         sim.clear_brush_mask(int(msg["id"]))
+    elif op == "clear_all_brushes":
+        sim.clear_all_brush_masks()
     elif op == "clear_state":
         sim.clear_state()
     elif op == "reseed":

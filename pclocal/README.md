@@ -33,7 +33,7 @@ bytes (`H × W × 4`) and skip the encoder entirely.
 |---|---|---|
 | frame transport | adaptive WebP/JPEG over WAN WS | raw RGBA over loopback WS |
 | bytes per frame (960×540) | ~30–60 KB (Q=68–92) | 2.07 MB (no compression) |
-| bandwidth @ default fps | ~3 MB/s @ 30 fps | ~60 MB/s @ 30 fps (loopback can do ≫1 GB/s) |
+| bandwidth @ default fps | ~3 MB/s @ 30 fps | ~120 MB/s @ 60 fps (loopback can do ≫1 GB/s) |
 | encode CPU on server | 5–10 ms / frame | 0 |
 | client-side decode | `createImageBitmap` ~3–5 ms | `putImageData` ~1–2 ms |
 | visible artifacts | yes (DCT blocks, chroma noise) | none — pixel-perfect |
@@ -196,8 +196,8 @@ common ones:
 | Var | Default | Effect |
 |---|---|---|
 | `NCA_W` / `NCA_H` | `960` / `540` | simulation grid size (also dictates the wire frame size: `W × H × 4` bytes) |
-| `NCA_FPS` | `30` | render/broadcast rate — controls visual refresh smoothness (Kinect cursor liveness, paint stroke responsiveness). Cheap (~10ms render per frame), so this can stay high independent of `NCA_SPS`. |
-| `NCA_SPS` | `10` | NCA steps per second — controls *how fast the simulation evolves* (pattern growth, drip flow). Each step costs ~20–25ms on Apple Silicon at 960×540, so this is the main GPU-load knob. Kept intentionally low so the sim looks calm and never overruns its budget. To bump evolution rate without changing the loop pacing, push the UI **Speed** slider (`steps_per_frame`) — Speed=3 + sps=10 ≈ 30 sps of NCA evolution. |
+| `NCA_FPS` | `60` | render/broadcast rate — controls visual refresh smoothness (Kinect cursor liveness, paint stroke responsiveness). Cheap (~2ms render per frame on a 4080), so this can stay high independent of `NCA_SPS`. Drop to `30` on slower GPUs. |
+| `NCA_SPS` | `20` | NCA steps per second — controls *how fast the simulation evolves* (pattern growth, drip flow). Each step is ~30–50ms on a 4080 with brushes active, so this is the main GPU-load knob. 20 keeps the loop comfortably under-budget; drop to `10` if you want a slower, calmer aesthetic. To bump evolution rate without changing loop pacing, push the UI **Speed** slider (`steps_per_frame`). |
 | `NCA_MODELS_DIR` | first match from `_KNOWN_BASE_MODEL_DIRS`, then `pclocal\..\..\texture_model`, then `pclocal\texture_model` | folder of `.npy` weights for the **A/B/C/D base slots**. Override with an **absolute** path if your machine isn't in the hardcoded list. |
 | `NCA_BRUSH_MODELS_DIR` | first match from `_KNOWN_BRUSH_MODEL_DIRS`, then `pclocal\..\..\brush_model`, then `pclocal\brush_model` | folder of `.npy` weights for the **paint brush picker** only. Curate this folder by hand — drop in just the brush-friendly models you want exposed in the picker. Empty / missing folder is OK; picker will show "(brush folder is empty)". |
 | `NCA_PAINT_QUEUE_MAX` | `4096` | brush-event ring-buffer capacity |
@@ -228,7 +228,7 @@ Highlights:
 | Frame quality | lossy (DCT artifacts) | **pixel-perfect** (no encoder) |
 | Server-side encode CPU | 5–10 ms/frame | 0 |
 | Client-side decode CPU | `createImageBitmap` ~3–5 ms | `putImageData` ~1–2 ms |
-| Default FPS / SPS | 30 / 30 | 30 / 10 (decoupled — visual refresh stays smooth, NCA evolution is intentionally calm) |
+| Default FPS / SPS | 30 / 30 | 60 / 20 (decoupled — render runs at monitor refresh, NCA stays comfortably under-budget) |
 | Latency | 30–80 ms typical | 5–15 ms |
 | Hand events | bridge → server → ⚠ user pastes URL | bridge → same app, automatic |
 | Adaptive quality controller | yes | removed |
@@ -248,13 +248,13 @@ as copies of the remote ones; the edits are:
   * Adaptive-quality controller (`_aq`, `_aq_record`, `_aq_tick`) and
     its env vars (`NCA_WEBP_Q`, `NCA_ADAPTIVE_*`) deleted.
   * `hello` advertises `frame_format` + `frame_bytes`.
-  * Default `NCA_FPS` / `NCA_SPS` decoupled to `30` / `10` (was both
-    60). The render/broadcast loop stays at 30 fps so the canvas
-    refreshes smoothly alongside the ~30Hz Kinect hand stream, while
-    the NCA simulator only ticks 10×/sec so each step has plenty of
-    GPU budget and never overruns. Result: smooth-feeling visuals with
-    a calm, deliberate pattern-evolution pace. See the long comment
-    above the constants in `nca_server.py`.
+  * Default `NCA_FPS` / `NCA_SPS` decoupled to `60` / `20` (was both
+    60), tuned for an RTX 4080-class PC. The broadcast loop runs at
+    monitor refresh so Kinect motion stays fluid, while the NCA
+    simulator only ticks 20×/sec so each step has plenty of GPU
+    budget and never overruns. On slower GPUs drop both via env vars
+    (e.g. `NCA_FPS=30 NCA_SPS=10`). See the long comment above the
+    constants in `nca_server.py`.
 * **`pclocal/bridge/kinect_depth_source.py`** —
   `KinectDepthSource.start()` made idempotent (no-op if already
   running) so it's safe under the new lifespan chaining.

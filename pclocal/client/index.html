@@ -549,7 +549,20 @@ var strokeFlushTimer = null;
 var strokeFlushIntervalMs = 1000 / 60; // Fixed stroke send cadence independent of 120Hz displays.
 var lastStrokeFlushAt = 0;
 
-window.addEventListener('keydown', function(e) { if (e.key === 'Shift') shiftHeldForTouch = true; });
+window.addEventListener('keydown', function(e) {
+  if (e.key === 'Shift') { shiftHeldForTouch = true; return; }
+  // Space = wipe every brush's paint in one shot (NCA base layers stay
+  // intact). We swallow the default scroll behavior so it doesn't jump
+  // the page while in fullscreen / zoomed-out view.
+  if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') {
+    var t = e.target;
+    var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (typing) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    send({ op: 'clear_all_brushes' });
+  }
+});
 window.addEventListener('keyup',   function(e) { if (e.key === 'Shift') shiftHeldForTouch = false; });
 
 function isEraseEvent(e) {
