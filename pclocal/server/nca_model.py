@@ -92,11 +92,11 @@ class Params:
     # Spray paint feel (matches background_multiPerlin_4move_highResol_cpugpu_rotate.html)
     spray_splatter_amount: int = 12     # # of small jittered dots around main disk
     spray_splatter_radius: float = 30.0 # max offset of splatter dots (in px)
-    spray_drip_threshold: float = 0.45  # wet build-up before a drip can spawn
+    spray_drip_threshold: float = 0.43  # wet build-up before a drip can spawn
     spray_drip_speed: float = 0.40      # 0..1, higher = faster drips
     spray_drip_wobble: float = 0.25     # 0..1, sideways drift while dripping
     spray_drip_min_width: float = 1.0
-    spray_drip_chance: float = 0.12     # per-stamp spawn prob once wet > threshold
+    spray_drip_chance: float = 0.14     # per-stamp spawn prob once wet > threshold
     drip_gravity: int = 2               # 0=down, 1=up, 2=left, 3=right
     disturbance: bool = False
     show_mask_tint: bool = False
@@ -590,12 +590,12 @@ class NCASimulator:
                 width_factor = drip_w ** 1.4                       # ~1..9
                 drip_len = 3 + int(np.random.random() * 4.0 * width_factor)
                 # Lucky long: small extension, scaled by drip mass too.
-                if np.random.random() < 0.15:
+                if np.random.random() < 0.18:
                     drip_len += int(np.random.random() * 2.0 * width_factor)
                 # Runaway streamer: requires both heavy wetness AND fat drop.
-                # Only triggers on long-press / heavy overpaint. ~1% of
+                # Only triggers on long-press / heavy overpaint. ~2.5% of
                 # qualifying drips.
-                if drip_w > 3.2 and over_ratio > 4.0 and np.random.random() < 0.01:
+                if drip_w > 3.2 and over_ratio > 4.0 and np.random.random() < 0.017:
                     drip_len += 70 + int(np.random.random() * 260)
                 flat_i = int(top_idx[li])
                 bm.drips.append({
