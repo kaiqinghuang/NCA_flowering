@@ -15,8 +15,9 @@ Run:
 Protocol (single bidirectional WS at /ws):
   Client → Server  (JSON text frames)
     {"op": "list_models"}
-    {"op": "load_base", "slot": 0..3, "path": "..."}
-    {"op": "load_brush", "path": "..."}
+        → {"type":"models","models":[base...],"brush_models":[brush...]}
+    {"op": "load_base",  "slot": 0..3, "path": "..."}  # path is relative to MODELS_DIR
+    {"op": "load_brush", "path": "..."}                # path is relative to BRUSH_MODELS_DIR
     {"op": "remove_brush", "id": int}
     {"op": "select_brush", "id": int}
     {"op": "stamp", "id": int, "x": int, "y": int, "r": float, "erase": bool}
@@ -110,40 +111,68 @@ PAINT_BATCH_LIMIT = int(os.environ.get("NCA_PAINT_BATCH_LIMIT", "96"))
 # wall-clock drip flow speed unchanged.
 DRIP_EVOLVE_EVERY = int(os.environ.get("NCA_DRIP_EVOLVE_EVERY", "2"))
 SCRIPT_DIR = Path(__file__).parent.resolve()
-# Where to look for .npy weights, in priority order:
-#   1. NCA_MODELS_DIR env var (absolute or relative-to-server-dir)
+# Two separate weight folders, picked independently:
+#
+#   * MODELS_DIR        — used for the four base slots (A/B/C/D). This is
+#                         the original `texture_model` library.
+#   * BRUSH_MODELS_DIR  — used only by the paint brush picker (load_brush).
+#                         Curated subset that the operator drops .npy files
+#                         into; intentionally *not* the same folder as the
+#                         base library so the two pools don't pollute each
+#                         other.
+#
+# Each folder is resolved with the same priority chain via `_pick_dir`:
+#   1. Env var (absolute, or relative to server dir)
 #   2. Hardcoded absolute paths for known dev machines (so the demo PC
-#      doesn't need any env var to start). Add your own machine's path
-#      to the list below.
-#   3. <repo-root>/texture_model  (i.e. pclocal/../../texture_model)
-#   4. pclocal/texture_model
+#      doesn't need any env var to start)
+#   3. <repo-root>/<folder_name>  (i.e. pclocal/../../<folder_name>)
+#   4. pclocal/<folder_name>
 # The first candidate that exists AND contains at least one .npy file
 # wins. If nothing matches, we still fall back to candidate #3 so the
-# log clearly shows the expected layout.
-_KNOWN_MODEL_DIRS: list[Path] = [
+# log clearly shows the expected layout (an empty/missing folder is
+# legal — the picker will just be empty until you put files in).
+_KNOWN_BASE_MODEL_DIRS: list[Path] = [
     Path(r"C:\Users\xiaoh\Documents\NCA_flowering\texture_model"),
 ]
-_FALLBACK_MODEL_DIRS: list[Path] = [
+_FALLBACK_BASE_MODEL_DIRS: list[Path] = [
     (SCRIPT_DIR / ".." / ".." / "texture_model").resolve(),
     (SCRIPT_DIR / ".." / "texture_model").resolve(),
 ]
 
+_KNOWN_BRUSH_MODEL_DIRS: list[Path] = [
+    Path(r"C:\Users\xiaoh\Documents\NCA_flowering\brush_model"),
+]
+_FALLBACK_BRUSH_MODEL_DIRS: list[Path] = [
+    (SCRIPT_DIR / ".." / ".." / "brush_model").resolve(),
+    (SCRIPT_DIR / ".." / "brush_model").resolve(),
+]
 
-def _pick_models_dir() -> Path:
-    env = os.environ.get("NCA_MODELS_DIR")
+
+def _pick_dir(env_var: str, known: list[Path], fallback: list[Path]) -> Path:
+    """Pick a weights folder using the standard priority chain.
+
+    See the comment block above for the priority order. Returns an
+    absolute Path; the folder is *not* required to exist — callers must
+    handle missing/empty folders gracefully (e.g. by returning [] from a
+    listing helper).
+    """
+    env = os.environ.get(env_var)
     if env:
         p = Path(env)
         return p.resolve() if p.is_absolute() else (SCRIPT_DIR / p).resolve()
-    for cand in _KNOWN_MODEL_DIRS + _FALLBACK_MODEL_DIRS:
+    for cand in known + fallback:
         try:
             if cand.is_dir() and any(cand.glob("*.npy")):
                 return cand
         except OSError:
             continue
-    return _FALLBACK_MODEL_DIRS[0]
+    return fallback[0]
 
 
-MODELS_DIR = _pick_models_dir()
+MODELS_DIR = _pick_dir("NCA_MODELS_DIR", _KNOWN_BASE_MODEL_DIRS, _FALLBACK_BASE_MODEL_DIRS)
+BRUSH_MODELS_DIR = _pick_dir(
+    "NCA_BRUSH_MODELS_DIR", _KNOWN_BRUSH_MODEL_DIRS, _FALLBACK_BRUSH_MODEL_DIRS
+)
 CLIENT_DIR = SCRIPT_DIR.parent / "client"
 
 # Pick best available device (CUDA > MPS > CPU)
@@ -280,17 +309,29 @@ def _try_set_tcp_nodelay(ws: WebSocket) -> bool:
     return False
 
 
-def list_available_models() -> list[str]:
-    if not MODELS_DIR.exists():
+def _list_npy_in(folder: Path) -> list[str]:
+    if not folder.exists():
         return []
-    return sorted([p.name for p in MODELS_DIR.glob("*.npy")])
+    return sorted([p.name for p in folder.glob("*.npy")])
+
+
+def list_available_base_models() -> list[str]:
+    return _list_npy_in(MODELS_DIR)
+
+
+def list_available_brush_models() -> list[str]:
+    return _list_npy_in(BRUSH_MODELS_DIR)
 
 
 # ---------- WS handler ----------
 async def handle_message(ws: WebSocket, msg: dict):
     op = msg.get("op")
     if op == "list_models":
-        await ws.send_text(json.dumps({"type": "models", "models": list_available_models()}))
+        await ws.send_text(json.dumps({
+            "type": "models",
+            "models": list_available_base_models(),
+            "brush_models": list_available_brush_models(),
+        }))
     elif op == "load_base":
         slot = int(msg["slot"])
         path = MODELS_DIR / msg["path"]
@@ -298,7 +339,9 @@ async def handle_message(ws: WebSocket, msg: dict):
         sim.set_base_model(slot, w)
         await ws.send_text(json.dumps({"type": "loaded_base", "slot": slot, "name": w.name}))
     elif op == "load_brush":
-        path = MODELS_DIR / msg["path"]
+        # Brush models live in their own folder so the picker can be
+        # curated independently of the base library (see BRUSH_MODELS_DIR).
+        path = BRUSH_MODELS_DIR / msg["path"]
         print(f"[ws] load_brush path={path} exists={path.exists()}")
         w = load_model(path, DEVICE)
         bm_id = sim.add_brush_model(w)
@@ -388,7 +431,8 @@ async def ws_endpoint(ws: WebSocket):
             "fps": TARGET_FPS,
             "frame_format": FRAME_FORMAT,
             "frame_bytes": FRAME_BYTES,
-            "models": list_available_models(),
+            "models": list_available_base_models(),
+            "brush_models": list_available_brush_models(),
         }))
         while True:
             text = await ws.receive_text()
@@ -652,7 +696,14 @@ async def on_startup():
         f"sps={TARGET_STEPS_PER_SEC} format={FRAME_FORMAT} "
         f"frame_bytes={FRAME_BYTES} (~{raw_mb_per_s:.0f} MB/s on loopback)"
     )
-    print(f"[nca_server] models dir: {MODELS_DIR} ({len(list_available_models())} found)")
+    print(
+        f"[nca_server] base  models dir: {MODELS_DIR} "
+        f"({len(list_available_base_models())} .npy found)"
+    )
+    print(
+        f"[nca_server] brush models dir: {BRUSH_MODELS_DIR} "
+        f"({len(list_available_brush_models())} .npy found)"
+    )
     _win_timer_active = _try_set_windows_timer_resolution(WIN_TIMER_PERIOD_MS)
     print(
         f"[nca_server] win_timer_{WIN_TIMER_PERIOD_MS}ms="

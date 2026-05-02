@@ -322,7 +322,8 @@ var statusEl = document.getElementById('status');
 var infoEl = document.getElementById('info');
 
 // ----- State -----
-var availableModels = [];        // [filename...]
+var availableModels = [];        // base library — feeds A/B/C/D selectors
+var availableBrushModels = [];   // brush library — feeds the brushPicker only
 var brushes = [];                // [{id, name, color}]
 var selectedBrushId = null;
 var brushSize = 5;
@@ -378,9 +379,15 @@ function handleJson(msg) {
     var fmt = msg.frame_format || 'rgba8';
     statusEl.textContent = 'Connected — device: ' + msg.device + ' | ' + W + '×' + H + ' | ' + fmt;
     availableModels = msg.models || [];
+    // Server now sends two independent libraries: `models` (base library
+    // for A/B/C/D) and `brush_models` (curated brush folder). Old servers
+    // only sent `models` — fall back to that so a stale server still fills
+    // the brush picker with something usable.
+    availableBrushModels = msg.brush_models || msg.models || [];
     populateModelSelectors();
   } else if (msg.type === 'models') {
     availableModels = msg.models || [];
+    availableBrushModels = msg.brush_models || msg.models || [];
     populateModelSelectors();
   } else if (msg.type === 'loaded_base') {
     // Could update label per slot if desired
@@ -425,6 +432,10 @@ function drawFrameRaw(arrayBuffer) {
 }
 
 // ----- Model selectors -----
+// Base slots A/B/C/D draw from `availableModels` (the original
+// texture_model library). The brush picker draws from
+// `availableBrushModels` (the curated brush_model folder), so the user
+// can keep the two pools separate without polluting either dropdown.
 function populateModelSelectors() {
   var slots = ['baseA', 'baseB', 'baseC', 'baseD'];
   slots.forEach(function(id) {
@@ -438,11 +449,18 @@ function populateModelSelectors() {
   });
   var picker = document.getElementById('brushPicker');
   picker.innerHTML = '';
-  availableModels.forEach(function(name) {
+  if (availableBrushModels.length === 0) {
     var opt = document.createElement('option');
-    opt.value = name; opt.textContent = name;
+    opt.value = ''; opt.textContent = '(brush folder is empty)';
+    opt.disabled = true;
     picker.appendChild(opt);
-  });
+  } else {
+    availableBrushModels.forEach(function(name) {
+      var opt = document.createElement('option');
+      opt.value = name; opt.textContent = name;
+      picker.appendChild(opt);
+    });
+  }
 }
 
 ['baseA', 'baseB', 'baseC', 'baseD'].forEach(function(id, slot) {
@@ -452,7 +470,7 @@ function populateModelSelectors() {
 });
 document.getElementById('addBrushBtn').onclick = function() {
   var path = document.getElementById('brushPicker').value;
-  console.log('[+add brush] picker value =', JSON.stringify(path), '| availableModels =', availableModels.length);
+  console.log('[+add brush] picker value =', JSON.stringify(path), '| availableBrushModels =', availableBrushModels.length);
   if (!path) {
     statusEl.textContent = 'No brush model selected — pick one in the dropdown first';
     return;

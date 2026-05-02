@@ -143,33 +143,38 @@ Then open <http://127.0.0.1:8000/> in a browser.
 
 ### Where the NCA models are loaded from
 
-`server\nca_server.py` looks for `.npy` weight files in this order, and
-picks the first directory that exists AND contains at least one `.npy`:
+There are **two independent .npy folders**, picked separately so the
+base library and the brush picker don't pollute each other:
 
-1. `$env:NCA_MODELS_DIR` (env var; absolute, or relative to
-   `pclocal\server\`).
-2. **Hardcoded paths for known dev machines** — see `_KNOWN_MODEL_DIRS`
-   in `nca_server.py`. The demo Windows PC's path
-   (`C:\Users\xiaoh\Documents\NCA_flowering\texture_model`) is already
-   listed there, so on that PC you don't need to set anything — just
-   `uvicorn` and go. To add another machine, append its path to that
-   list and rebuild.
-3. `<repo-root>\texture_model` (i.e. `pclocal\..\..\texture_model`).
-4. `pclocal\texture_model`.
+| Folder | Used by | Env var | Default candidates (first hit wins) |
+|---|---|---|---|
+| **Base library** | A/B/C/D base slots (`load_base`) | `NCA_MODELS_DIR` | `_KNOWN_BASE_MODEL_DIRS` (e.g. `C:\Users\xiaoh\Documents\NCA_flowering\texture_model`), then `<repo>\texture_model`, then `pclocal\texture_model` |
+| **Brush library** | Paint brush picker (`load_brush`) | `NCA_BRUSH_MODELS_DIR` | `_KNOWN_BRUSH_MODEL_DIRS` (e.g. `C:\Users\xiaoh\Documents\NCA_flowering\brush_model`), then `<repo>\brush_model`, then `pclocal\brush_model` |
 
-The startup log prints the chosen path and how many `.npy` files were
-found:
+For each folder the resolver tries:
+
+1. The env var (absolute, or relative to `pclocal\server\`).
+2. The hardcoded "known dev machine" paths in `nca_server.py` — append
+   your own machine here to skip the env var.
+3. `<repo-root>\<folder_name>` (i.e. `pclocal\..\..\<folder_name>`).
+4. `pclocal\<folder_name>`.
+
+The first candidate that exists AND contains at least one `.npy` wins.
+If none match, the resolver still returns candidate #3 so the startup
+log shows where you should drop files. **An empty / missing brush
+folder is fine** — the brush picker just shows "(brush folder is
+empty)" until you put `.npy` files in it.
+
+The startup log prints both chosen paths and the file counts:
 
 ```
-[nca_server] models dir: C:\...\texture_model (37 found)
+[nca_server] base  models dir: C:\...\texture_model (37 .npy found)
+[nca_server] brush models dir: C:\...\brush_model (5 .npy found)
 ```
 
-If `(0 found)` appears, the resolver fell all the way through without
-finding any `.npy` — check that the folder really has the weight files
-and either drop them under one of the candidate paths or set
-`NCA_MODELS_DIR` explicitly. The browser "Base A/B/C/D" and "Add Brush"
-dropdowns are populated from that list, so an empty models dir shows up
-in the UI as "no models to load".
+The browser dropdowns are wired separately: **Base A/B/C/D** dropdowns
+read from the base library, and **Brush models → "+ add"** reads from
+the brush library.
 
 The first time you launch it on a new physical setup:
 
@@ -193,7 +198,8 @@ common ones:
 | `NCA_W` / `NCA_H` | `960` / `540` | simulation grid size (also dictates the wire frame size: `W × H × 4` bytes) |
 | `NCA_FPS` | `30` | render/broadcast rate — controls visual refresh smoothness (Kinect cursor liveness, paint stroke responsiveness). Cheap (~10ms render per frame), so this can stay high independent of `NCA_SPS`. |
 | `NCA_SPS` | `10` | NCA steps per second — controls *how fast the simulation evolves* (pattern growth, drip flow). Each step costs ~20–25ms on Apple Silicon at 960×540, so this is the main GPU-load knob. Kept intentionally low so the sim looks calm and never overruns its budget. To bump evolution rate without changing the loop pacing, push the UI **Speed** slider (`steps_per_frame`) — Speed=3 + sps=10 ≈ 30 sps of NCA evolution. |
-| `NCA_MODELS_DIR` | first match from `_KNOWN_MODEL_DIRS`, then `pclocal\..\..\texture_model`, then `pclocal\texture_model` | folder of `.npy` weights. Override with an **absolute** path if your machine isn't in the hardcoded list. |
+| `NCA_MODELS_DIR` | first match from `_KNOWN_BASE_MODEL_DIRS`, then `pclocal\..\..\texture_model`, then `pclocal\texture_model` | folder of `.npy` weights for the **A/B/C/D base slots**. Override with an **absolute** path if your machine isn't in the hardcoded list. |
+| `NCA_BRUSH_MODELS_DIR` | first match from `_KNOWN_BRUSH_MODEL_DIRS`, then `pclocal\..\..\brush_model`, then `pclocal\brush_model` | folder of `.npy` weights for the **paint brush picker** only. Curate this folder by hand — drop in just the brush-friendly models you want exposed in the picker. Empty / missing folder is OK; picker will show "(brush folder is empty)". |
 | `NCA_PAINT_QUEUE_MAX` | `4096` | brush-event ring-buffer capacity |
 | `NCA_PAINT_BATCH_LIMIT` | `96` | paint events drained per sim step |
 | `NCA_DRIP_EVOLVE_EVERY` | `2` | spawn/evolve drips every Nth step |
