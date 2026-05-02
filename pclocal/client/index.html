@@ -46,12 +46,12 @@
   }
   .canvas-wrap:fullscreen #canvas,
   .canvas-wrap:-webkit-full-screen #canvas {
-    width: 1920px; height: 1080px; position: relative;
+    width: 3840px; height: 2160px; position: relative;
     border: none; border-radius: 0;
   }
   .canvas-wrap:fullscreen #overlayCanvas,
   .canvas-wrap:-webkit-full-screen #overlayCanvas {
-    width: 1920px; height: 1080px; position: absolute;
+    width: 3840px; height: 2160px; position: absolute;
     left: 50%; top: 50%; transform: translate(-50%, -50%);
   }
 
@@ -174,7 +174,7 @@
       </div>
       <button class="btn" id="clearBtn">Clear canvas</button>
       <button class="btn" id="reseedBtn">New noise seed</button>
-      <button class="btn" id="fsBtn">Fullscreen 1920×1080</button>
+      <button class="btn" id="fsBtn">Fullscreen 3840×2160</button>
     </div>
 
     <div class="panel">
@@ -668,11 +668,11 @@ document.getElementById('clearBrushBtn').onclick = function() {
   if (selectedBrushId !== null) send({ op: 'clear_brush', id: selectedBrushId });
 };
 
-// ----- Fullscreen 1920×1080 (pure 2× nearest-neighbor upscale from 960×540) -----
+// ----- Fullscreen 3840×2160 (pure 4× nearest-neighbor upscale from 960×540) -----
 // The wrapper div (canvas + overlay + calibration layer) goes fullscreen so
 // that Kinect cursor / calibration markers stay aligned with the paint canvas.
 // `image-rendering: pixelated` on each canvas guarantees nearest-neighbor
-// sampling, so a 960×540 source pixel becomes exactly a 2×2 block at 1920×1080.
+// sampling, so a 960×540 source pixel becomes exactly a 4×4 block at 3840×2160.
 var canvasWrapEl = document.getElementById('canvasWrap');
 document.getElementById('fsBtn').onclick = function() {
   var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
@@ -688,9 +688,9 @@ document.getElementById('fsBtn').onclick = function() {
 function onFullscreenChange() {
   var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
   if (fsEl === canvasWrapEl) {
-    // CSS pins both canvases to 1920×1080 while the wrapper fills the screen.
-    canvas.style.width = '1920px';
-    canvas.style.height = '1080px';
+    // CSS pins both canvases to 3840×2160 while the wrapper fills the screen.
+    canvas.style.width = '3840px';
+    canvas.style.height = '2160px';
   } else {
     applyZoom();
   }
