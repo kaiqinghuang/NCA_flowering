@@ -480,13 +480,30 @@ class NCASimulator:
         add = torch.where(inside, torch.full_like(sub, per_pixel), torch.zeros_like(sub))
         new_mask = torch.clamp(sub + add, 0.0, 1.0)
         bm.mask[y0:y1, x0:x1] = new_mask
-        # Ownership rule: main disk always claims (you really are painting
-        # there). Splatter pixels only claim if their mask value is actually
-        # visible — otherwise an outer splatter dot with mask ≈ 0.1 would
-        # steal ownership from the brush underneath without producing any
-        # visible color of its own (the user sees a "hole").
+        # Ownership rule: a pixel only changes hands when the *new* brush's
+        # mask there is strong enough to actually paint the pixel visibly
+        # (i.e. above mask_threshold, the same cutoff the sigmoid uses in
+        # _rebuild_mask). This applies uniformly to main-disk and splatter
+        # pixels.
+        #
+        # Why uniformly (the previous rule excluded main disk):
+        #   Each stamp deposits per_pixel ≈ 0.10 of mask. The sigmoid's
+        #   threshold defaults to 0.43, so a single light tap leaves the
+        #   brush's claim ≈ 0 even on its main disk. If we still let it
+        #   steal ownership from the brush underneath, that pixel would
+        #   render as base (no brush has a strong claim), producing a
+        #   visible "hole" where neither the new nor the old brush shows.
+        #   This bites especially hard with auto-brush-cycling on Kinect:
+        #   a visitor's startPinch fires one stamp and then they leave —
+        #   the stolen-but-invisible patch is exactly the artefact the
+        #   user reported.
+        #
+        # With this rule, a quick light touch leaves the prior brush in
+        # place; only a sustained / heavy stamp (mask crosses threshold)
+        # actually displaces what was there. Painting on empty (base)
+        # territory is unchanged because the prior owner was -1 anyway.
         vis_thr = float(self.p.mask_threshold)
-        claim_owner = main_inside | (splat_inside & (new_mask >= vis_thr))
+        claim_owner = (main_inside | splat_inside) & (new_mask >= vis_thr)
         self.stroke_owner[y0:y1, x0:x1] = torch.where(
             claim_owner, torch.full_like(owner, int(bm.id)), owner,
         )
