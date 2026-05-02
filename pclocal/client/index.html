@@ -146,6 +146,18 @@
         <button class="btn" id="addBrushBtn">+ add</button>
       </div>
       <div id="brushList"></div>
+      <div class="row" style="margin-top:6px;">
+        <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#bbb;">
+          <input type="checkbox" id="autoCycleBrushChk" checked>
+          Auto-cycle brush each round
+        </label>
+      </div>
+      <div class="help" style="margin-top:2px;">
+        Each "round" starts when your hand re-enters the scene (after
+        being out for ~0.8s). The next loaded brush is selected
+        automatically. Manual selection mid-round is preserved; cycling
+        resumes from your choice on the next round.
+      </div>
     </div>
 
     <div class="panel">
@@ -332,6 +344,20 @@ var frameCount = 0;
 var bytesRecv = 0;
 var lastSampleT = performance.now();
 var fps = 0;
+
+// ----- Auto-cycle brush across "interaction rounds" -----
+// A round = continuous hand presence in the calibrated TV view. When
+// the hand has been out of the scene for HAND_LOST_DEBOUNCE_MS, the
+// round is considered over; the next time we see a tracked hand, we
+// rotate to the next loaded brush. The first round after page load
+// does NOT cycle (we want to honour whatever brush the user picked
+// before they started waving), so `firstRoundConsumed` gates the
+// initial transition.
+var autoCycleBrushOnRound = true;
+var handPresent = false;
+var lastHandSeenAt = 0;
+var firstRoundConsumed = false;
+var HAND_LOST_DEBOUNCE_MS = 800;
 
 // ----- WS connect -----
 // Local build: server sends raw RGBA bytes (W*H*4 per frame). We grab
@@ -640,6 +666,14 @@ bindRange('speedRange', 'speedVal', 'set_param', 'steps_per_frame');
 bindCheck('activeChk', 'set_param', 'active');
 bindCheck('disturbChk', 'set_param', 'disturbance');
 bindCheck('tintChk', 'set_param', 'show_mask_tint');
+// Local-only checkbox: drives the client-side auto-cycle logic in
+// onHandFrame/updateRoundState. Not sent to the server.
+(function() {
+  var chk = document.getElementById('autoCycleBrushChk');
+  if (!chk) return;
+  autoCycleBrushOnRound = !!chk.checked;
+  chk.onchange = function(e) { autoCycleBrushOnRound = !!e.target.checked; };
+})();
 bindRange('nsRange', 'nsVal', 'set_param', 'noise_scale');
 bindRange('ocRange', 'ocVal', 'set_param', 'octaves', function(x) { return x / 100; });
 bindRange('bhRange', 'bhVal', 'set_param', 'layer_freq_spread', function(x) { return x / 100; });
@@ -1064,6 +1098,47 @@ function endPinch() {
   pinchQueuedEnd = null;
 }
 
+// Rotate selectedBrushId to the next loaded brush (wrapping around).
+// No-op if fewer than 2 brushes are loaded. If nothing is currently
+// selected (or the selection isn't in the list any more), pick the
+// first brush. The brushList UI is rebuilt so the highlight follows.
+function cycleBrushToNext() {
+  if (brushes.length < 2) return;
+  var currentIdx = brushes.findIndex(function(b) { return b.id === selectedBrushId; });
+  var nextIdx = currentIdx < 0 ? 0 : (currentIdx + 1) % brushes.length;
+  var picked = brushes[nextIdx];
+  selectedBrushId = picked.id;
+  rebuildBrushList();
+  console.log(
+    '[auto-cycle] -> brush #' + picked.id + ' (' + picked.name + ')',
+    '| pool size = ' + brushes.length
+  );
+}
+
+// Update the "is hand currently present?" debounced flag and trigger a
+// brush cycle on the leading edge of each new round. Call this on
+// every hand frame, regardless of pinch state — the cycle reacts to
+// hand presence in the scene, not the pinch gesture itself, so a
+// visitor who walks up and lifts their hand will already have the
+// next brush ready before they pinch.
+function updateRoundState(handVisible) {
+  var now = performance.now();
+  if (handVisible) {
+    lastHandSeenAt = now;
+    if (!handPresent) {
+      handPresent = true;
+      // Skip the cycle on the very first round so we don't override the
+      // brush the user manually selected before any hand was detected.
+      if (firstRoundConsumed && autoCycleBrushOnRound) {
+        cycleBrushToNext();
+      }
+      firstRoundConsumed = true;
+    }
+  } else if (handPresent && (now - lastHandSeenAt) > HAND_LOST_DEBOUNCE_MS) {
+    handPresent = false;
+  }
+}
+
 function onHandFrame(m) {
   if (m.tv_status) bridgeTvStatus = m.tv_status;
   if (typeof m.tv_ready === 'boolean') bridgeTvReady = m.tv_ready;
@@ -1071,11 +1146,21 @@ function onHandFrame(m) {
   renderOverlay(m);
   updateKinectDebug(m);
 
+  // "Hand visible in the scene" for round-tracking purposes: TV must be
+  // calibrated, the bridge has a valid canvas-space coordinate, and we
+  // aren't in the middle of TV calibration. We update this on every
+  // frame *before* the early returns so the round state stays correct
+  // even while calibration runs or tracking briefly drops out.
+  var haveCanvasPos = (typeof m.cx === 'number' && typeof m.cy === 'number');
+  var handVisible = (
+    !tvAutoCalRunning && m.tracked === true && haveCanvasPos && bridgeTvReady
+  );
+  updateRoundState(handVisible);
+
   if (tvAutoCalRunning) {
     if (pinchActive) endPinch();
     return;
   }
-  var haveCanvasPos = (typeof m.cx === 'number' && typeof m.cy === 'number');
   if (!haveCanvasPos || !m.tracked) {
     if (pinchActive) endPinch();
     return;
