@@ -6,8 +6,8 @@ is sent as **raw RGBA bytes** (length = ``W * H * 4``) over a loopback
 WebSocket, and the browser blits it directly to a canvas via
 ``putImageData``. No JPEG/WebP encoder, no compression artifacts, no
 adaptive-quality controller — every pixel on screen is the exact NCA
-output. At 1920×1080 / 60 fps the loopback bandwidth is ~500 MB/s,
-which the kernel handles without breaking a sweat.
+output. At 960×540 / 15 fps the loopback bandwidth is ~30 MB/s, well
+within what the kernel handles for free.
 
 Run:
     uvicorn nca_server:app --host 127.0.0.1 --port 8000
@@ -58,11 +58,31 @@ from npy_loader import load_model
 # ---------- Config (override via env) ----------
 H = int(os.environ.get("NCA_H", "540"))
 W = int(os.environ.get("NCA_W", "960"))
-# Local build: 60 fps default — the cost gets removed since we no longer
-# encode JPEG/WebP per frame. Drop to 30 if your GPU step time alone
-# can't keep up.
-TARGET_FPS = float(os.environ.get("NCA_FPS", "60"))
-TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "60"))
+# Local build: 15 fps / 15 sps default. This is *intentionally slow*.
+#
+# Rationale: the previous 60/60 target was aspirational — on Apple
+# Silicon (MPS) the actual NCA step costs ~20–25ms at 960×540, plus
+# ~10ms render and asyncio dispatch overhead. The loop would fire steps
+# faster than the GPU could complete them, so wall-clock throughput
+# settled around 12 sps with highly *uneven* per-frame latency. Visually
+# that reads as "stuttering / dropped frames" even though the GPU is the
+# real bottleneck.
+#
+# Picking a target the GPU can hit comfortably (15 sps × ~25ms = 375ms
+# of step work per second, ≈40% utilization) makes every frame land on
+# time, so the simulation looks *evenly slow* — a calm, flowing pace
+# rather than a frantic-but-stuttery one. Drips and NCA evolution end
+# up running at ~1/4 the previous wall-clock speed (since `spawn_drips`
+# was tuned around 60 sps), which fits the slow-painting aesthetic.
+#
+# To temporarily speed things back up without touching the loop rate,
+# turn up the UI `Speed` slider (`steps_per_frame`); e.g. Speed=4 with
+# sps=15 ≈ the old 60 sps evolution rate.
+#
+# Override with NCA_FPS / NCA_SPS env vars if you want a faster machine
+# to push more.
+TARGET_FPS = float(os.environ.get("NCA_FPS", "15"))
+TARGET_STEPS_PER_SEC = float(os.environ.get("NCA_SPS", "15"))
 PAINT_QUEUE_MAX = int(os.environ.get("NCA_PAINT_QUEUE_MAX", "4096"))
 # Cap how many paint events one step can drain. Lower value = smoother
 # step times during fast painting (excess events queue up and get processed
